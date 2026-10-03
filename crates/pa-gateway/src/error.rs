@@ -19,6 +19,10 @@ pub enum Error {
     TooLarge,
     #[error("invalid request")]
     InvalidRequest,
+    /// An earlier attempt with the same idempotency key is in flight or has an
+    /// unknown outcome. Reconcile session history before using a new key.
+    #[error("an earlier attempt with this idempotency key has an unknown outcome")]
+    IdempotencyUnresolved,
     #[error("storage unavailable")]
     Storage(#[source] anyhow::Error),
     /// The runtime was unreachable or explicitly refused the operation, so it
@@ -43,6 +47,7 @@ impl Error {
             Self::LimitExceeded => "limit_exceeded",
             Self::TooLarge => "too_large",
             Self::InvalidRequest => "invalid_request",
+            Self::IdempotencyUnresolved => "idempotency_unresolved",
             Self::Storage(_) => "storage_unavailable",
             Self::NotDelivered(_) => "not_delivered",
             Self::Runtime(_) => "runtime_unavailable",

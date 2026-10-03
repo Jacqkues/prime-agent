@@ -65,6 +65,6 @@ Depends on no workspace crate (sits beside pa-types at the bottom of the
 dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
 
 `pa-gateway` also consumes this crate. Its optional host-supplied client emits
-`agent feature outcome` with `gateway_session`, `gateway_share` or
-`gateway_prompt` as `feature_name`, a random feature ID and `completed` outcome.
+`agent feature outcome` with `gateway_session`, `gateway_share`,
+`gateway_transfer` or `gateway_prompt` as `feature_name`, a random feature ID and `completed` outcome.
 No tenant, participant or session identity, prompt or endpoint enters these events.

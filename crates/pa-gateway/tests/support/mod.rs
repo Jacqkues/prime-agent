@@ -11,8 +11,8 @@ use std::{
 use futures::{stream, StreamExt};
 use pa_gateway::{Error, EventStream, Gateway, MemoryStore, Result, Runtime, WorkspacePolicy};
 use pa_types::gateway::{
-    AttributedPrompt, EventCursor, GatewayAction, Principal, RuntimeEvent, RuntimeEventKind,
-    StoredSession, Workspace,
+    AttributedPrompt, EventCursor, GatewayAction, PageRequest, Principal, RuntimeEvent,
+    RuntimeEventKind, StoredSession, Workspace,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 #[derive(Default)]
 pub struct Policy {
     pub denied: RwLock<BTreeSet<String>>,
+    pub admins: RwLock<BTreeSet<String>>,
     pub checks: AtomicUsize,
 }
 
@@ -28,13 +29,24 @@ impl WorkspacePolicy for Policy {
         &self,
         principal: &Principal,
         workspace: &Workspace,
-        _action: GatewayAction,
+        action: GatewayAction,
     ) -> Result<()> {
         self.checks.fetch_add(1, Ordering::Relaxed);
-        if principal.tenant_id == workspace.tenant_id
+        let member = principal.tenant_id == workspace.tenant_id
             && workspace.workspace_id == "project"
-            && !self.denied.read().await.contains(&principal.user_id)
-        {
+            && !self.denied.read().await.contains(&principal.user_id);
+        let granted = match action {
+            GatewayAction::Administer => {
+                member && self.admins.read().await.contains(&principal.user_id)
+            }
+            GatewayAction::Create
+            | GatewayAction::Read
+            | GatewayAction::Prompt
+            | GatewayAction::Share
+            | GatewayAction::Cancel
+            | GatewayAction::Close => member,
+        };
+        if granted {
             Ok(())
         } else {
             Err(Error::Forbidden)
@@ -48,6 +60,10 @@ pub struct Agent {
     pub events: Mutex<BTreeMap<String, broadcast::Sender<RuntimeEvent>>>,
     pub closed: Mutex<Vec<String>>,
     pub admission_gate: Mutex<Option<AdmissionGate>>,
+    /// Returned once by the next `prompt` instead of admitting it.
+    pub prompt_error: Mutex<Option<Error>>,
+    /// Returned once by the next `close` instead of closing.
+    pub close_error: Mutex<Option<Error>>,
 }
 
 pub struct AdmissionGate {
@@ -66,6 +82,9 @@ impl Runtime for Agent {
     }
 
     async fn prompt(&self, _record: &StoredSession, prompt: AttributedPrompt) -> Result<()> {
+        if let Some(error) = self.prompt_error.lock().await.take() {
+            return Err(error);
+        }
         let gate = self.admission_gate.lock().await.take();
         let committed = if let Some(gate) = gate {
             gate.entered.send(()).unwrap();
@@ -90,6 +109,9 @@ impl Runtime for Agent {
     }
 
     async fn close(&self, record: &StoredSession) -> Result<()> {
+        if let Some(error) = self.close_error.lock().await.take() {
+            return Err(error);
+        }
         self.closed.lock().await.push(record.session.id.clone());
         Ok(())
     }
@@ -164,4 +186,8 @@ pub fn sequenced(sequence: u64, data: Value) -> RuntimeEvent {
         }),
         data,
     }
+}
+
+pub fn page(limit: usize) -> PageRequest {
+    PageRequest { after: None, limit }
 }

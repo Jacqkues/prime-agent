@@ -2,7 +2,8 @@ use std::{future::Future, pin::Pin};
 
 use futures::Stream;
 use pa_types::gateway::{
-    AttributedPrompt, GatewayAction, Principal, RuntimeEvent, StoredSession, Workspace,
+    AttributedPrompt, GatewayAction, PageRequest, Principal, PromptKey, PromptOutcome,
+    PromptReservation, RuntimeEvent, StoredPage, StoredSession, Workspace,
 };
 
 use crate::Result;
@@ -18,14 +19,46 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<RuntimeEvent>> + Send>>;
 /// reject mismatches with `Error::Conflict`. Successful writes must be visible
 /// to subsequent reads. Production adapters must persist before returning.
 /// Implementations must not log session content or silently recover failed writes.
+///
+/// Listing is keyset-paginated by ascending session ID: return at most
+/// `page.limit` records with IDs greater than `page.after`, and set `next` to
+/// the last returned ID when more may follow. Index membership and workspace so
+/// a page never scans the whole tenant.
+///
+/// Prompt keys are idempotency records. `reserve_prompt` must atomically insert
+/// the key with `request_id` when absent, or report the existing record. A key
+/// settled as `NotDelivered` must be removed so it can be reserved again. The
+/// host chooses a retention period for settled keys.
 pub trait SessionStore: Send + Sync + 'static {
     fn insert(&self, record: StoredSession) -> impl Future<Output = Result<()>> + Send;
     fn get(&self, tenant: &str, id: &str) -> impl Future<Output = Result<StoredSession>> + Send;
-    fn list(&self, tenant: &str) -> impl Future<Output = Result<Vec<StoredSession>>> + Send;
+    /// Sessions in `tenant` whose members include `user_id`.
+    fn list_member(
+        &self,
+        tenant: &str,
+        user_id: &str,
+        page: &PageRequest,
+    ) -> impl Future<Output = Result<StoredPage>> + Send;
+    /// Every session in `workspace`, whatever its status or members.
+    fn list_workspace(
+        &self,
+        workspace: &Workspace,
+        page: &PageRequest,
+    ) -> impl Future<Output = Result<StoredPage>> + Send;
     fn replace(
         &self,
         record: StoredSession,
         expected_revision: u64,
+    ) -> impl Future<Output = Result<()>> + Send;
+    fn reserve_prompt(
+        &self,
+        key: &PromptKey,
+        request_id: &str,
+    ) -> impl Future<Output = Result<PromptReservation>> + Send;
+    fn settle_prompt(
+        &self,
+        key: &PromptKey,
+        outcome: PromptOutcome,
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
@@ -34,7 +67,8 @@ pub trait SessionStore: Send + Sync + 'static {
 /// Validate the principal's current workspace membership on every call. `Create`
 /// and `Prompt` are also the host's admission/quota seams. Gateway session roles
 /// are an additional restriction, never a replacement for this check. Inviting a
-/// member checks `Read` for that member too. Return an error to deny access.
+/// member checks `Read` for that member too. Grant `Administer` only to
+/// workspace administrators. Return an error to deny access.
 pub trait WorkspacePolicy: Send + Sync + 'static {
     fn check(
         &self,

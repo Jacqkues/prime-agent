@@ -5,7 +5,7 @@
 use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -17,13 +17,16 @@ use axum::{
 };
 use futures::StreamExt;
 use pa_types::gateway::{
-    EventCursor, GatewayEvent, Principal, SessionRole, SubscribeFrom, GATEWAY_EVENT_VERSION,
+    EventCursor, GatewayEvent, PageRequest, Principal, PromptSubmission, SessionRole,
+    SubscribeFrom, GATEWAY_EVENT_VERSION,
 };
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::Instant;
 
 use crate::{Error, Gateway, Result, Runtime, SessionStore, WorkspacePolicy};
+
+const DEFAULT_PAGE: usize = 50;
 
 /// Verify the host application's credentials, including expiration, audience,
 /// issuer and revocation as appropriate. Never trust a caller-supplied user or
@@ -58,6 +61,28 @@ struct MemberBody {
     role: SessionRole,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerBody {
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageQuery {
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+impl From<PageQuery> for PageRequest {
+    fn from(query: PageQuery) -> Self {
+        Self {
+            after: query.after,
+            limit: query.limit.unwrap_or(DEFAULT_PAGE),
+        }
+    }
+}
+
 /// Build an authenticated router with session, membership, prompt and SSE routes.
 /// No listener is bound and no global middleware or environment state is changed.
 // Keep the route table together; session policy and execution live in Gateway.
@@ -71,10 +96,12 @@ where
 {
     let create = gateway.clone();
     let list = gateway.clone();
+    let administer = gateway.clone();
     let read = gateway.clone();
     let close = gateway.clone();
     let share = gateway.clone();
     let revoke = gateway.clone();
+    let transfer = gateway.clone();
     let prompt = gateway.clone();
     let cancel = gateway.clone();
     let stream_auth = Arc::clone(&auth);
@@ -92,10 +119,28 @@ where
                     }
                 },
             )
-            .get(move |Extension(principal): Extension<Principal>| {
-                let gateway = list.clone();
-                async move { gateway.list(&principal).await.map(Json) }
-            }),
+            .get(
+                move |Extension(principal): Extension<Principal>, Query(page): Query<PageQuery>| {
+                    let gateway = list.clone();
+                    async move { gateway.list(&principal, page.into()).await.map(Json) }
+                },
+            ),
+        )
+        .route(
+            "/workspaces/{workspace_id}/sessions",
+            get(
+                move |Extension(principal): Extension<Principal>,
+                      Path(workspace_id): Path<String>,
+                      Query(page): Query<PageQuery>| {
+                    let gateway = administer.clone();
+                    async move {
+                        gateway
+                            .list_workspace(&principal, workspace_id, page.into())
+                            .await
+                            .map(Json)
+                    }
+                },
+            ),
         )
         .route(
             "/sessions/{id}",
@@ -146,15 +191,48 @@ where
             ),
         )
         .route(
+            "/sessions/{id}/owner",
+            put(
+                move |Extension(principal): Extension<Principal>,
+                      Path(id): Path<String>,
+                      Json(body): Json<OwnerBody>| {
+                    let gateway = transfer.clone();
+                    async move {
+                        gateway
+                            .transfer_ownership(principal, id, body.user_id)
+                            .await
+                            .map(Json)
+                    }
+                },
+            ),
+        )
+        .route(
             "/sessions/{id}/prompts",
             post(
                 move |Extension(principal): Extension<Principal>,
+                      headers: HeaderMap,
                       Path(id): Path<String>,
                       Json(body): Json<PromptBody>| {
                     let gateway = prompt.clone();
                     async move {
+                        let idempotency_key = match headers.get("idempotency-key") {
+                            Some(value) => Some(
+                                value
+                                    .to_str()
+                                    .map_err(|_| Error::InvalidRequest)?
+                                    .to_owned(),
+                            ),
+                            None => None,
+                        };
                         gateway
-                            .prompt(principal, id, body.text)
+                            .prompt(
+                                principal,
+                                id,
+                                PromptSubmission {
+                                    text: body.text,
+                                    idempotency_key,
+                                },
+                            )
                             .await
                             .map(|receipt| (StatusCode::ACCEPTED, Json(receipt)))
                     }
@@ -270,7 +348,7 @@ impl IntoResponse for Error {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::Conflict | Self::NotReady => StatusCode::CONFLICT,
+            Self::Conflict | Self::NotReady | Self::IdempotencyUnresolved => StatusCode::CONFLICT,
             Self::LimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidRequest => StatusCode::BAD_REQUEST,
