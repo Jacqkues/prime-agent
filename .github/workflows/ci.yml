@@ -197,6 +197,8 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Gateway optional HTTP integration (clippy and tests)
+        run: make gateway-check
 
   # The test suite, sharded per the SHARD_COUNT knob above: each shard runs
   # the test binaries whose stable crc32 hash lands in its slice

@@ -482,8 +482,20 @@ pub const AUTH_CATEGORIES: &[&str] = &[
 
 /// The #2117 feature names.
 pub const FEATURE_NAMES: &[&str] = &[
-    "model", "login", "logout", "effort", "goal", "new", "resume", "fork", "clone", "tree",
+    "model",
+    "login",
+    "logout",
+    "effort",
+    "goal",
+    "new",
+    "resume",
+    "fork",
+    "clone",
+    "tree",
     "feedback",
+    "gateway_session",
+    "gateway_share",
+    "gateway_prompt",
 ];
 
 /// The #2117 feature outcomes.

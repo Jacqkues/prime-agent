@@ -3,7 +3,13 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
+	$(MAKE) gateway-check
 	cargo build --release --workspace
+
+# Optional gateway HTTP surface is not enabled by the default workspace build.
+gateway-check:
+	cargo clippy -p pa-gateway --all-features --all-targets --locked -- -D warnings
+	cargo test -p pa-gateway --all-features --locked
 
 
 # Supply-chain gates — local mirrors of the
@@ -185,4 +191,4 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates
+.PHONY: check gateway-check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates

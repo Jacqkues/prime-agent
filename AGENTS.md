@@ -149,6 +149,7 @@ The table summarizes each crate's current direct workspace dependencies:
 | `pa-types` | Shared wire and domain types | none |
 | `pa-telemetry` | Events and sinks | none |
 | `pa-agent` | Provider-independent agent loop | none |
+| `pa-gateway` | Embeddable multi-user access, session membership, host adapters and optional HTTP | `pa-types`, `pa-telemetry` |
 | `pa-ai` | Providers, model registry, streaming | `pa-types` |
 | `pa-models` | Live model catalog and transport | `pa-ai`, `pa-types` |
 | `pa-core` | Session engine, tools, skills, kernel, settings | `pa-types`, `pa-ai`, `pa-models`, `pa-agent`, `pa-telemetry` |
@@ -163,6 +164,17 @@ Layering rules:
   Shared wire/domain vocabulary belongs in `pa-types`, not in a higher crate or a duplicate.
 - `pa-tui` renders from wire types and events; it does not link the session engine.
 - `pa-cli` is a composition root: it wires crates together and contains no business logic.
+
+### Gateway integration boundary
+
+`pa-gateway` is a reusable library for other applications. Authentication, durable
+metadata storage, workspace provisioning, credentials and quota policy belong to
+the embedding host through documented adapters. HTTP is optional. Do not require
+a particular identity provider, database or container platform. The native daemon
+adapter consumes `pa-types` over the existing wire protocol, without linking
+`pa-core` or `pa-daemon`. Shared gateway vocabulary lives in `pa-types::gateway`.
+Session membership is many-to-many; every operation checks tenant, workspace and
+session access. A session role must never grant access to another workspace.
 
 ## Reliability model
 

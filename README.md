@@ -104,6 +104,12 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
 - **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
 
+## Embedding in your application
+
+For embedding shared agent sessions in your own application, see
+[pa-gateway](crates/pa-gateway/README.md). It provides a Rust library and an optional
+HTTP/SSE router with host-supplied authentication, storage and runtime adapters.
+
 ## Contributing
 
 Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
