@@ -21,6 +21,10 @@ pub enum Error {
     InvalidRequest,
     #[error("storage unavailable")]
     Storage(#[source] anyhow::Error),
+    /// The runtime was unreachable or explicitly refused the operation, so it
+    /// certainly did not take effect. Safe to retry.
+    #[error("runtime did not accept the operation")]
+    NotDelivered(#[source] anyhow::Error),
     /// Delivery may have succeeded. Never automatically retry a mutation.
     #[error("runtime unavailable; delivery outcome may be unknown")]
     Runtime(#[source] anyhow::Error),
@@ -40,6 +44,7 @@ impl Error {
             Self::TooLarge => "too_large",
             Self::InvalidRequest => "invalid_request",
             Self::Storage(_) => "storage_unavailable",
+            Self::NotDelivered(_) => "not_delivered",
             Self::Runtime(_) => "runtime_unavailable",
         }
     }

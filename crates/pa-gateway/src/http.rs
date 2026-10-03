@@ -274,7 +274,7 @@ impl IntoResponse for Error {
             Self::LimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidRequest => StatusCode::BAD_REQUEST,
-            Self::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Storage(_) | Self::NotDelivered(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Runtime(_) => StatusCode::BAD_GATEWAY,
         };
         (

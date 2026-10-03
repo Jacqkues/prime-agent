@@ -49,7 +49,8 @@ pub trait WorkspacePolicy: Send + Sync + 'static {
 /// Implementations isolate workspaces, keep author attribution in durable input,
 /// serialize admitted prompts, and keep work alive after HTTP disconnection.
 /// A successful `prompt` means admitted, not completed. No operation is retried
-/// automatically. Subscriptions
+/// automatically once it may have been delivered; return `Error::NotDelivered`
+/// only when the operation certainly did not take effect. Subscriptions
 /// begin with a `Snapshot` and then ordered `Event`s carrying cursors when the
 /// runtime has them; slow consumers must fail explicitly instead of silently
 /// losing data. Credentials and endpoint selection come exclusively from the host.
