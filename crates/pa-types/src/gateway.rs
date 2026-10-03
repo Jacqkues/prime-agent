@@ -81,3 +81,59 @@ pub struct AttributedPrompt {
 pub struct PromptReceipt {
     pub request_id: String,
 }
+
+/// Opaque position in a runtime's ordered event stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventCursor {
+    pub generation: String,
+    pub sequence: u64,
+}
+
+/// Whether a runtime frame replaces client state or applies on top of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEventKind {
+    Snapshot,
+    Event,
+}
+
+/// One frame from a runtime subscription. `data` is the runtime's native
+/// payload; `cursor` orders and deduplicates events when the runtime has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEvent {
+    pub kind: RuntimeEventKind,
+    pub cursor: Option<EventCursor>,
+    pub data: serde_json::Value,
+}
+
+/// Version of the [`GatewayEvent`] envelope delivered to clients.
+pub const GATEWAY_EVENT_VERSION: u32 = 1;
+
+/// Versioned client envelope for subscription frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayEvent {
+    pub v: u32,
+    #[serde(flatten)]
+    pub event: RuntimeEvent,
+}
+
+/// Where a subscription starts. A snapshot is always delivered first;
+/// resuming additionally skips events at or before the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeFrom {
+    Start,
+    After(EventCursor),
+}
+
+/// Process-local operational counters for the host's metrics exporter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayMetrics {
+    pub sessions_created: u64,
+    pub sessions_failed: u64,
+    pub prompts_admitted: u64,
+    pub prompts_failed: u64,
+    pub runtime_errors: u64,
+    pub active_subscriptions: u64,
+    pub access_rechecks: u64,
+    pub streams_revoked: u64,
+}

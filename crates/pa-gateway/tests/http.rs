@@ -2,7 +2,14 @@
 
 mod support;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -19,17 +26,36 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use support::{service, user};
+use support::{sequenced, service, user};
 
-struct Auth(RwLock<BTreeMap<String, Principal>>);
+struct Auth {
+    tokens: RwLock<BTreeMap<String, Principal>>,
+    revalidation: Duration,
+    calls: AtomicUsize,
+}
+
+impl Auth {
+    fn new(tokens: BTreeMap<String, Principal>, revalidation: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            tokens: RwLock::new(tokens),
+            revalidation,
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
 
 impl Authenticator for Auth {
+    fn stream_revalidation(&self) -> Duration {
+        self.revalidation
+    }
+
     async fn authenticate(&self, headers: &HeaderMap) -> Result<Principal> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         let token = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .ok_or(Error::Unauthenticated)?;
-        self.0
+        self.tokens
             .read()
             .await
             .get(token)
@@ -55,11 +81,14 @@ async fn body(response: Response) -> Value {
 #[tokio::test]
 async fn embedding_preserves_host_identity_and_enforces_shared_session_permissions() {
     let (gateway, _, _, agent) = service();
-    let auth = Arc::new(Auth(RwLock::new(BTreeMap::from([
-        ("Bearer alice-key".into(), user("team", "alice")),
-        ("Bearer bob-key".into(), user("team", "bob")),
-        ("Bearer outsider-key".into(), user("other", "alice")),
-    ]))));
+    let auth = Auth::new(
+        BTreeMap::from([
+            ("Bearer alice-key".into(), user("team", "alice")),
+            ("Bearer bob-key".into(), user("team", "bob")),
+            ("Bearer outsider-key".into(), user("other", "alice")),
+        ]),
+        Duration::ZERO,
+    );
     let app = axum::Router::new().nest("/my-app/v1", router(gateway, auth));
     let base = "/my-app/v1/sessions";
     let response = app
@@ -159,10 +188,10 @@ async fn revoked_credentials_terminate_an_open_sse_stream() {
         .create(alice.clone(), "project".into())
         .await
         .unwrap();
-    let auth = Arc::new(Auth(RwLock::new(BTreeMap::from([(
-        "Bearer key".into(),
-        alice,
-    )]))));
+    let auth = Auth::new(
+        BTreeMap::from([("Bearer key".into(), alice)]),
+        Duration::ZERO,
+    );
     let app = router(gateway, Arc::clone(&auth));
     let response = app
         .oneshot(request(
@@ -177,14 +206,72 @@ async fn revoked_credentials_terminate_an_open_sse_stream() {
     let mut stream = response.into_body().into_data_stream();
     let snapshot = stream.next().await.unwrap().unwrap();
     assert!(std::str::from_utf8(&snapshot).unwrap().contains("snapshot"));
-    auth.0.write().await.clear();
+    auth.tokens.write().await.clear();
     agent.events.lock().await[&session.id]
-        .send(json!({"private": "new data"}))
+        .send(support::event(json!({"private": "new data"})))
         .unwrap();
     let frame = stream.next().await.unwrap().unwrap();
     assert_eq!(
         std::str::from_utf8(&frame).unwrap(),
-        "event: error\ndata: {\"error\":\"authentication required\"}\n\n"
+        "event: error\ndata: {\"error\":\"authentication required\",\"code\":\"unauthenticated\"}\n\n"
     );
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn http_contract_versions_events_resumes_and_reports_stable_codes() {
+    let (gateway, _, _, agent) = service();
+    let alice = user("team", "alice");
+    let session = gateway
+        .create(alice.clone(), "project".into())
+        .await
+        .unwrap();
+    let auth = Auth::new(
+        BTreeMap::from([("Bearer key".into(), alice)]),
+        Duration::from_secs(3600),
+    );
+    let app = router(gateway, Arc::clone(&auth));
+    let base = format!("/sessions/{}", session.id);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("{base}/prompts"),
+            "Bearer key",
+            &json!({"text": "x".repeat(65_537)}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        body(response).await,
+        json!({"error": "request is too large", "code": "too_large"})
+    );
+
+    let mut resume = request("GET", &format!("{base}/events"), "Bearer key", &Value::Null);
+    resume
+        .headers_mut()
+        .insert("last-event-id", "g1:1".parse().unwrap());
+    let response = app.oneshot(resume).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = auth.calls.load(Ordering::Relaxed);
+    let mut stream = response.into_body().into_data_stream();
+    let snapshot = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        std::str::from_utf8(&snapshot).unwrap(),
+        "event: runtime\ndata: {\"v\":1,\"kind\":\"snapshot\",\"cursor\":null,\"data\":{\"type\":\"snapshot\"}}\n\n"
+    );
+    let sender = agent.events.lock().await[&session.id].clone();
+    for sequence in 1..=2 {
+        sender
+            .send(sequenced(sequence, json!({"n": sequence})))
+            .unwrap();
+    }
+    let frame = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        std::str::from_utf8(&frame).unwrap(),
+        "event: runtime\ndata: {\"v\":1,\"kind\":\"event\",\"cursor\":{\"generation\":\"g1\",\"sequence\":2},\"data\":{\"n\":2}}\nid: g1:2\n\n"
+    );
+    assert_eq!(auth.calls.load(Ordering::Relaxed), calls);
 }

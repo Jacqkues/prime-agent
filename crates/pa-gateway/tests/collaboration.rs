@@ -2,9 +2,9 @@ mod support;
 
 use futures::StreamExt;
 use pa_gateway::{Error, SessionStore};
-use pa_types::gateway::{AttributedPrompt, SessionRole, SessionStatus};
+use pa_types::gateway::{AttributedPrompt, SessionRole, SessionStatus, SubscribeFrom};
 use serde_json::json;
-use support::{service, user};
+use support::{event, service, snapshot, user};
 
 #[tokio::test]
 async fn disconnect_during_admission_does_not_cancel_the_mutation() {
@@ -56,18 +56,18 @@ async fn collaborators_share_events_and_reconnect_without_stopping_work() {
         .await
         .unwrap();
     let mut first = gateway
-        .subscribe(alice.clone(), session.id.clone())
+        .subscribe(alice.clone(), session.id.clone(), SubscribeFrom::Start)
         .await
         .unwrap();
     let mut second = gateway
-        .subscribe(bob.clone(), session.id.clone())
+        .subscribe(bob.clone(), session.id.clone(), SubscribeFrom::Start)
         .await
         .unwrap();
     assert_eq!(
         first.next().await.unwrap().unwrap(),
         second.next().await.unwrap().unwrap()
     );
-    let event = json!({"type": "token", "text": "shared"});
+    let event = event(json!({"type": "token", "text": "shared"}));
     agent.events.lock().await[&session.id]
         .send(event.clone())
         .unwrap();
@@ -95,11 +95,11 @@ async fn collaborators_share_events_and_reconnect_without_stopping_work() {
     assert_eq!(prompts.len(), 2);
     assert!(expected.iter().all(|prompt| prompts.contains(prompt)));
     drop(prompts);
-    let mut reconnected = gateway.subscribe(bob, session.id).await.unwrap();
-    assert_eq!(
-        reconnected.next().await.unwrap().unwrap(),
-        json!({"type": "snapshot"})
-    );
+    let mut reconnected = gateway
+        .subscribe(bob, session.id, SubscribeFrom::Start)
+        .await
+        .unwrap();
+    assert_eq!(reconnected.next().await.unwrap().unwrap(), snapshot());
     assert!(agent.closed.lock().await.is_empty());
 }
 
@@ -253,17 +253,17 @@ async fn revoke_stops_existing_stream_without_delivering_the_next_event() {
         )
         .await
         .unwrap();
-    let mut stream = gateway.subscribe(bob, session.id.clone()).await.unwrap();
-    assert_eq!(
-        stream.next().await.unwrap().unwrap(),
-        json!({"type": "snapshot"})
-    );
+    let mut stream = gateway
+        .subscribe(bob, session.id.clone(), SubscribeFrom::Start)
+        .await
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap(), snapshot());
     gateway
         .remove_member(alice, session.id.clone(), "bob".into())
         .await
         .unwrap();
     agent.events.lock().await[&session.id]
-        .send(json!({"secret": "after revocation"}))
+        .send(event(json!({"secret": "after revocation"})))
         .unwrap();
     assert!(matches!(stream.next().await, Some(Err(Error::NotFound))));
     assert!(stream.next().await.is_none());
@@ -344,7 +344,7 @@ async fn owner_cannot_be_removed_or_duplicated_and_inputs_are_bounded() {
     ));
     assert!(matches!(
         gateway.prompt(alice, session.id, "x".repeat(65_537)).await,
-        Err(Error::LimitExceeded)
+        Err(Error::TooLarge)
     ));
     assert!(agent.prompts.lock().await.is_empty());
 }

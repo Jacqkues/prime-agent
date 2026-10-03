@@ -2,7 +2,7 @@
 //! Authentication, TLS, CORS, request concurrency limits and deployment remain
 //! host-owned. Bearer credentials are never accepted in query strings.
 
-use std::{convert::Infallible, future::Future, sync::Arc};
+use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Request, State},
@@ -16,18 +16,28 @@ use axum::{
     Extension, Json, Router,
 };
 use futures::StreamExt;
-use pa_types::gateway::{Principal, SessionRole};
+use pa_types::gateway::{
+    EventCursor, GatewayEvent, Principal, SessionRole, SubscribeFrom, GATEWAY_EVENT_VERSION,
+};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::time::Instant;
 
 use crate::{Error, Gateway, Result, Runtime, SessionStore, WorkspacePolicy};
 
 /// Verify the host application's credentials, including expiration, audience,
 /// issuer and revocation as appropriate. Never trust a caller-supplied user or
-/// tenant header without verification. Called for every HTTP request and before
-/// each SSE event; returning an error denies access and terminates a stream.
+/// tenant header without verification. Called for every HTTP request and again
+/// on open SSE streams; returning an error denies access and terminates a stream.
 pub trait Authenticator: Send + Sync + 'static {
     fn authenticate(&self, headers: &HeaderMap) -> impl Future<Output = Result<Principal>> + Send;
+
+    /// Longest time an open SSE stream keeps delivering events before its
+    /// credentials are verified again. Return `Duration::ZERO` to verify before
+    /// every event, at the cost of one authentication per event per subscriber.
+    fn stream_revalidation(&self) -> Duration {
+        Duration::from_secs(5)
+    }
 }
 
 #[derive(Deserialize)]
@@ -174,28 +184,65 @@ where
                     let gateway = gateway.clone();
                     let auth = Arc::clone(&stream_auth);
                     async move {
-                        let events = gateway.subscribe(principal.clone(), id).await?;
+                        let from = match headers.get("last-event-id") {
+                            Some(value) => {
+                                let (generation, sequence) = value
+                                    .to_str()
+                                    .ok()
+                                    .and_then(|value| value.rsplit_once(':'))
+                                    .ok_or(Error::InvalidRequest)?;
+                                SubscribeFrom::After(EventCursor {
+                                    generation: generation.to_owned(),
+                                    sequence: sequence.parse().map_err(|_| Error::InvalidRequest)?,
+                                })
+                            }
+                            None => SubscribeFrom::Start,
+                        };
+                        let events = gateway.subscribe(principal.clone(), id, from).await?;
+                        let revalidation = auth.stream_revalidation();
                         let stream = futures::stream::unfold(
-                            Some((events, auth, headers, principal)),
-                            |state| async move {
-                                let (mut events, auth, headers, principal) = state?;
+                            Some((events, auth, headers, principal, Instant::now() + revalidation)),
+                            move |state| async move {
+                                let (mut events, auth, headers, principal, mut verify_at) = state?;
                                 let event = events.next().await?;
-                                let verified = auth.authenticate(&headers).await;
-                                let event = match verified {
-                                    Ok(identity) if identity == principal => event,
-                                    Ok(_) => Err(Error::Unauthenticated),
-                                    Err(error) => Err(error),
+                                let event = if Instant::now() >= verify_at {
+                                    verify_at = Instant::now() + revalidation;
+                                    match auth.authenticate(&headers).await {
+                                        Ok(identity) if identity == principal => event,
+                                        Ok(_) => Err(Error::Unauthenticated),
+                                        Err(error) => Err(error),
+                                    }
+                                } else {
+                                    event
                                 };
-                                let terminal = event.is_err();
-                                let (name, data) = match event {
-                                    Ok(value) => ("runtime", value),
-                                    Err(error) => ("error", json!({"error": error.to_string()})),
-                                };
-                                let frame = Event::default().event(name).data(data.to_string());
-                                Some((
-                                    Ok::<_, Infallible>(frame),
-                                    (!terminal).then_some((events, auth, headers, principal)),
-                                ))
+                                let frame = event.and_then(|event| {
+                                    let id = event.cursor.as_ref().map(|cursor| {
+                                        format!("{}:{}", cursor.generation, cursor.sequence)
+                                    });
+                                    let data = serde_json::to_string(&GatewayEvent {
+                                        v: GATEWAY_EVENT_VERSION,
+                                        event,
+                                    })
+                                    .map_err(|error| Error::Runtime(error.into()))?;
+                                    let frame = Event::default().event("runtime").data(data);
+                                    Ok(match id {
+                                        Some(id) => frame.id(id),
+                                        None => frame,
+                                    })
+                                });
+                                Some(match frame {
+                                    Ok(frame) => (
+                                        Ok::<_, Infallible>(frame),
+                                        Some((events, auth, headers, principal, verify_at)),
+                                    ),
+                                    Err(error) => (
+                                        Ok(Event::default().event("error").data(
+                                            json!({"error": error.to_string(), "code": error.code()})
+                                                .to_string(),
+                                        )),
+                                        None,
+                                    ),
+                                })
                             },
                         );
                         Ok::<_, Error>(Sse::new(stream).keep_alive(KeepAlive::default()))
@@ -225,10 +272,15 @@ impl IntoResponse for Error {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Conflict | Self::NotReady => StatusCode::CONFLICT,
             Self::LimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidRequest => StatusCode::BAD_REQUEST,
             Self::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Runtime(_) => StatusCode::BAD_GATEWAY,
         };
-        (status, Json(json!({"error": self.to_string()}))).into_response()
+        (
+            status,
+            Json(json!({"error": self.to_string(), "code": self.code()})),
+        )
+            .into_response()
     }
 }

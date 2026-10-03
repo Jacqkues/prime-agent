@@ -1,14 +1,15 @@
 use std::{future::Future, pin::Pin};
 
 use futures::Stream;
-use pa_types::gateway::{AttributedPrompt, GatewayAction, Principal, StoredSession, Workspace};
-use serde_json::Value;
+use pa_types::gateway::{
+    AttributedPrompt, GatewayAction, Principal, RuntimeEvent, StoredSession, Workspace,
+};
 
 use crate::Result;
 
 /// Ordered runtime events. Dropping a subscription must release its resources
 /// without cancelling the session. Errors terminate a subscription.
-pub type EventStream = Pin<Box<dyn Stream<Item = Result<Value>> + Send>>;
+pub type EventStream = Pin<Box<dyn Stream<Item = Result<RuntimeEvent>> + Send>>;
 
 /// Application-owned session metadata persistence.
 ///
@@ -48,9 +49,10 @@ pub trait WorkspacePolicy: Send + Sync + 'static {
 /// Implementations isolate workspaces, keep author attribution in durable input,
 /// serialize admitted prompts, and keep work alive after HTTP disconnection.
 /// A successful `prompt` means admitted, not completed. No operation is retried
-/// automatically. Subscriptions begin with a current snapshot and then ordered
-/// events; slow consumers must fail explicitly instead of silently losing data.
-/// Credentials and endpoint selection come exclusively from the host.
+/// automatically. Subscriptions
+/// begin with a `Snapshot` and then ordered `Event`s carrying cursors when the
+/// runtime has them; slow consumers must fail explicitly instead of silently
+/// losing data. Credentials and endpoint selection come exclusively from the host.
 pub trait Runtime: Send + Sync + 'static {
     fn create(
         &self,
