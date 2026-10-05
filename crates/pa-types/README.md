@@ -8,7 +8,11 @@ Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/
 `gateway`: application principals, workspace identities, shared-session roles,
 metadata, runtime bindings, attributed prompts, admission receipts, prompt
 idempotency records, runtime event envelopes and cursors, pagination and
-gateway metrics. Gateway policy, persistence adapters and HTTP behavior belong to `pa-gateway`.
+gateway metrics. Gateway
+policy, persistence adapters and HTTP behavior belong to `pa-gateway`.
+`gateway::debug` defines bounded inspector snapshots, HTTP exchange metadata,
+allowlisted agent metadata and observer connectivity; collection lives in
+`pa-gateway`, without adding a dependency back to that crate.
 
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:
 - `daemon::framing`: the private-frame codec of the worker socket (direct-attach clients speak it too).
@@ -65,3 +69,8 @@ Everything in this crate is deliberately `pub` - it is the cross-crate contract.
 
 ## Depends on
 serde, serde_json, thiserror, anyhow, tokio, regex (the incident classifier's TS log-message patterns; see the `incident` scope entry). No workspace crates.
+
+`diagnostics` owns the versioned `ExecutionTrace` / `TracePoint` capture vocabulary
+and pure structured-credential redaction shared by producers and consumers.
+`gateway::debug` additionally owns trace index and source-health responses.
+Content capture is opt-in and is never an adoption telemetry payload.

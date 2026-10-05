@@ -94,6 +94,8 @@ where
     R: Runtime,
     A: Authenticator,
 {
+    #[cfg(feature = "debug")]
+    let inspector = gateway.inspector.clone();
     let create = gateway.clone();
     let list = gateway.clone();
     let administer = gateway.clone();
@@ -105,7 +107,7 @@ where
     let prompt = gateway.clone();
     let cancel = gateway.clone();
     let stream_auth = Arc::clone(&auth);
-    Router::new()
+    let router = Router::new()
         .route(
             "/sessions",
             post(
@@ -329,7 +331,17 @@ where
             ),
         )
         .layer(DefaultBodyLimit::max(128 * 1024))
-        .route_layer(middleware::from_fn_with_state(auth, authenticate::<A>))
+        .route_layer(middleware::from_fn_with_state(auth, authenticate::<A>));
+    #[cfg(feature = "debug")]
+    let router = if let Some(inspector) = inspector {
+        router.layer(middleware::from_fn_with_state(
+            inspector,
+            crate::debug::http::trace,
+        ))
+    } else {
+        router
+    };
+    router
 }
 
 async fn authenticate<A: Authenticator>(
@@ -338,6 +350,24 @@ async fn authenticate<A: Authenticator>(
     next: Next,
 ) -> Result<Response> {
     let principal = auth.authenticate(request.headers()).await?;
+    #[cfg(feature = "debug")]
+    if let Some(trace) = request.extensions().get::<crate::debug::RequestTrace>() {
+        trace.identify(&principal);
+    }
+    #[cfg(feature = "debug")]
+    if let Some(trace) = request
+        .extensions()
+        .get::<crate::debug::RequestTrace>()
+        .cloned()
+        .filter(crate::debug::RequestTrace::capturing)
+    {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 128 * 1024).await else {
+            return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+        };
+        trace.capture_request(parts.method.as_str(), parts.uri.path(), &bytes, &principal);
+        request = Request::from_parts(parts, axum::body::Body::from(bytes));
+    }
     request.extensions_mut().insert(principal);
     Ok(next.run(request).await)
 }

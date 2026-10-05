@@ -66,5 +66,16 @@ dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
 
 `pa-gateway` also consumes this crate. Its optional host-supplied client emits
 `agent feature outcome` with `gateway_session`, `gateway_share`,
-`gateway_transfer` or `gateway_prompt` as `feature_name`, a random feature ID and `completed` outcome.
+`gateway_transfer`, `gateway_prompt`, or `gateway_inspector` as `feature_name`, a random feature ID
+and `completed` outcome. Inspector snapshots never enter adoption telemetry.
 No tenant, participant or session identity, prompt or endpoint enters these events.
+
+Execution capture adoption uses the existing `agent feature outcome` schema with
+feature `gateway_execution_trace`. Only feature ID/outcome primitives are emitted;
+prompts, wire payloads and trace identifiers never enter adoption telemetry.
+
+The shared application-kernel example emits features `gateway_shared_kernel` and
+`gateway_kernel_catalog` through
+an explicit host telemetry seam when startup succeeds. The local example supplies
+an inert client; embedding hosts choose their own consented sink. No Python code,
+application state, function names/docstrings, user identity or conversation content enters these events.

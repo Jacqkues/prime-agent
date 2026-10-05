@@ -56,6 +56,53 @@ struct Route {
 }
 
 impl DaemonRuntime {
+    #[cfg(feature = "debug")]
+    pub(crate) fn workspaces(&self) -> Vec<Workspace> {
+        self.routes
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(feature = "debug")]
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn roster(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<futures::stream::BoxStream<'static, Result<Value>>> {
+        let mut connection = self.route(workspace)?.connect().await?;
+        let (snapshot, mut pending) = connection
+            .exchange(json!({"type": "roster_subscribe"}))
+            .await?;
+        pending.push_front(json!({"type": "roster_snapshot", "roster": snapshot["roster"]}));
+        Ok(Box::pin(futures::stream::unfold(
+            Some((connection, pending)),
+            |state| async move {
+                let (mut connection, mut pending) = state?;
+                loop {
+                    if let Some(frame) = pending.pop_front() {
+                        return Some((Ok(frame), Some((connection, pending))));
+                    }
+                    match connection.read().await {
+                        Ok(frame) if frame["type"] == "roster_update" => {
+                            return Some((Ok(frame), Some((connection, pending))));
+                        }
+                        Ok(frame) if frame["type"] == "daemon_closing" => {
+                            return Some((
+                                Err(Error::Runtime(anyhow::anyhow!("daemon closing"))),
+                                None,
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(error) => return Some((Err(error), None)),
+                    }
+                }
+            },
+        )))
+    }
+
     /// Register trusted workspace routes.
     ///
     /// # Errors

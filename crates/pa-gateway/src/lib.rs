@@ -10,6 +10,9 @@ mod ports;
 #[cfg(feature = "http")]
 pub mod http;
 
+#[cfg(feature = "debug")]
+pub mod debug;
+
 pub use daemon::{DaemonEndpoint, DaemonRuntime};
 pub use error::{Error, Result};
 pub use gateway::Gateway;

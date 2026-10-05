@@ -276,7 +276,7 @@ impl RequestTimingWiring {
     }
 
     fn enabled(&self) -> bool {
-        (self.enabled)()
+        (self.enabled)() || crate::diagnostics::enabled()
     }
 
     /// TS `markRequestTimingDispatch`: the latest turn overwrites the
@@ -474,6 +474,8 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                 wiring.log().clone(),
             ));
             let mut options = options;
+            let trace_id = uuid::Uuid::new_v4().to_string();
+            let payload_trace_id = trace_id.clone();
             // The payload hook chains the inner hook first, then measures
             // the final bytes and marks request-sent: the provider invokes
             // the hook before it opens the HTTP request, so the
@@ -490,6 +492,12 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                     .unwrap_or(payload);
                 timing_for_payload.record_request_bytes(measure_request_bytes(&next));
                 timing_for_payload.mark_request_sent();
+                if crate::diagnostics::enabled() {
+                    crate::diagnostics::record(
+                        pa_types::diagnostics::TracePoint::ModelRequest,
+                        &json!({"id":payload_trace_id,"sessionId":session_id,"requestSeq":request_seq,"model":model.id,"provider":model.provider,"body":next}),
+                    );
+                }
                 if let Some(capture) = capture_for_payload.as_ref() {
                     capture.record(&next, model, session_id.as_deref(), request_seq);
                 }
@@ -512,6 +520,7 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                 Ok(stream) => Ok(Box::new(TimingStream {
                     inner: stream,
                     timing,
+                    trace_id,
                 }) as Box<dyn ModelStream>),
             }
         })
@@ -528,6 +537,7 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
 struct TimingStream {
     inner: Box<dyn ModelStream>,
     timing: Arc<RequestTiming>,
+    trace_id: String,
 }
 
 impl ModelStream for TimingStream {
@@ -538,6 +548,9 @@ impl ModelStream for TimingStream {
                 timing.emit_summary(Outcome::Aborted);
                 return None;
             };
+            if crate::diagnostics::enabled() {
+                crate::diagnostics::model_event(&self.trace_id, &event);
+            }
             // TS `default` arm: the first streamed content block clears the
             // Waiting state (start/done/error are never first-token events).
             if is_request_timing_first_token_event(&event) {

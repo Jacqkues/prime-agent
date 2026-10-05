@@ -1,0 +1,249 @@
+.flow-map {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.flow-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  background: white;
+  border: 1px solid #dce6dd;
+  border-radius: 8px;
+  padding: 14px 15px;
+  color: #244331;
+  text-align: left;
+}
+.flow-node:after {
+  content: "→";
+  position: absolute;
+  right: -12px;
+  top: 35px;
+  color: #799583;
+  z-index: 1;
+}
+.flow-node:last-child:after {
+  display: none;
+}
+.flow-node:hover {
+  border-color: #388c58;
+  background: #f0f8f0;
+}
+.flow-number {
+  font: 9px var(--mono);
+  color: #8fa498;
+}
+.flow-node strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.flow-node small {
+  font: 9px var(--mono);
+  color: #87928a;
+}
+.trace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+.trace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.trace-toolbar select {
+  max-width: 200px;
+}
+.trace-toolbar label {
+  font-size: 10px;
+  color: var(--muted);
+}
+.trace-toolbar input {
+  vertical-align: middle;
+}
+.trace-graph {
+  overflow: auto;
+  height: 560px;
+  background: #fbfdf9;
+}
+.trace-graph svg {
+  display: block;
+  min-width: 1170px;
+}
+.lane-title {
+  font:
+    10px -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  font-weight: 600;
+  fill: #56665a;
+}
+.trace-row-background {
+  fill: transparent;
+}
+.trace-exchange {
+  cursor: pointer;
+  outline: none;
+}
+.trace-exchange:hover .trace-row-background,
+.trace-exchange:focus .trace-row-background {
+  fill: #eaf3e9;
+}
+.trace-exchange.selected .trace-row-background {
+  fill: #e0eedf;
+}
+.trace-time {
+  font: 9px var(--mono);
+  fill: #687c6b;
+}
+.trace-relative {
+  font: 8px var(--mono);
+  fill: #91a08e;
+}
+.trace-event-label {
+  font: 9px var(--mono);
+}
+.trace-pagination {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+.trace-pagination span {
+  font: 10px var(--mono);
+  color: var(--muted);
+}
+.payload-panel {
+  position: sticky;
+  top: 15px;
+}
+.payload-panel .panel-title {
+  align-items: flex-start;
+}
+.payload-panel h2 {
+  text-transform: capitalize;
+}
+.payload-meta {
+  font: 9px/1.7 var(--mono);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  margin-top: 6px;
+}
+.payload-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  gap: 5px;
+  padding: 9px 12px;
+}
+.payload-tabs button {
+  border: 0;
+  background: none;
+  color: #8a9288;
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+.payload-tabs button.active {
+  color: #286044;
+  background: #eaf3e7;
+}
+.payload-panel pre {
+  margin: 0;
+  max-height: 550px;
+  font-size: 10px;
+  line-height: 1.7;
+  padding: 16px;
+  background: #fbfcf9;
+}
+.payload-readable {
+  max-height: 550px;
+  overflow: auto;
+}
+.payload-readable pre {
+  max-height: none;
+}
+.prompt-message {
+  border-bottom: 1px solid var(--line);
+}
+.prompt-message h3 {
+  margin: 0;
+  padding: 10px 16px;
+  background: #f0f4ed;
+  color: #547657;
+  font: 10px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.capture-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  font-size: 10px;
+  color: #7d8979;
+  margin: 12px 0;
+}
+.capture-error {
+  color: #b35438;
+}
+.trace-panel > .panel-title {
+  border: 0;
+  padding: 0 0 18px;
+}
+.trace-empty {
+  padding: 36px;
+  font-size: 12px;
+  color: #849281;
+  line-height: 1.8;
+}
+.trace-note {
+  font-size: 10px;
+  color: var(--muted);
+  margin: 14px 0 0;
+  line-height: 1.7;
+}
+@media (max-width: 1750px) {
+  .trace-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .payload-panel {
+    position: static;
+  }
+  .payload-panel pre,
+  .payload-readable {
+    max-height: 450px;
+  }
+  .trace-graph {
+    height: 440px;
+  }
+}
+@media (max-width: 800px) {
+  .flow-map {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .flow-node:after {
+    display: none;
+  }
+  .flow-node {
+    padding: 10px;
+  }
+  .capture-caption {
+    display: block;
+  }
+  .trace-graph {
+    height: 390px;
+  }
+  .trace-toolbar select {
+    max-width: 170px;
+  }
+}

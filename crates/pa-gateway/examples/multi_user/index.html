@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Prime Agent · Shared Kernel Lab</title>
+    <link rel="stylesheet" href="/demo.css" />
+    <script src="/demo.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">pa<span> / </span>Prime Agent</a
+      ><span class="eyebrow">DEVELOPER PLAYGROUND</span
+      ><a class="debug-link" href="/inspect/" target="_blank" rel="noopener"
+        >Ouvrir le graphe de debug ↗</a
+      >
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <p class="eyebrow">SHARED KERNEL LAB</p>
+          <h1>Des sessions privées.<br /><span>Un kernel en commun.</span></h1>
+          <p class="description">
+            Chaque agent garde sa conversation. Tous enrichissent le même état Python.<br />
+            Créez un objet depuis une session, modifiez-le depuis une autre.
+          </p>
+        </div>
+        <div class="intro-mark" aria-hidden="true">
+          <span>A</span><span>B</span><span>C</span><i>↘ &nbsp; ↓ &nbsp; ↙</i
+          ><b>Python partagé</b>
+        </div>
+      </div>
+      <section class="controls" aria-label="Configuration de la démonstration">
+        <div class="mode-switch">
+          <button id="solo" class="selected" type="button">01 · Solo</button
+          ><button id="shared" type="button">02 · Plusieurs sessions</button>
+        </div>
+        <div class="session-controls">
+          <span id="session-label">Aucune session privée</span
+          ><button id="start" class="primary" type="button">
+            Démarrer les sessions</button
+          ><button id="close" type="button" disabled>Fermer</button>
+        </div>
+      </section>
+      <p id="notice" role="status">
+        Chaque carte correspond à une session privée. Seul l’état applicatif
+        Python est partagé.
+      </p>
+      <section id="users" class="user-grid" aria-label="Utilisateurs"></section>
+      <section class="application-state" aria-label="État applicatif partagé">
+        <div class="activity-heading">
+          <div>
+            <p class="eyebrow">UN SEUL PROCESSUS PYTHON PERSISTANT</p>
+            <h2>État de l’application</h2>
+          </div>
+          <span id="kernel-label">Connexion au kernel…</span>
+        </div>
+        <p class="description">
+          Les objets survivent à la fermeture d’une conversation. Les prompts
+          restent dans leur session.
+        </p>
+        <div class="state-grid">
+          <div class="counter-card">
+            <span>app['counter']</span><strong id="counter-value">0</strong
+            ><button id="increment" type="button" disabled>
+              +1 depuis le frontend
+            </button>
+          </div>
+          <div>
+            <h3>app['tasks']</h3>
+            <ul id="task-board">
+              <li>Aucune tâche pour le moment.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="function-catalog">
+          <div class="activity-heading">
+            <h3>Fonctions disponibles</h3>
+            <span id="function-count">0 fonction</span>
+          </div>
+          <p class="description">Un récapitulatif est transmis à chaque agent avec son message. Les fonctions se mettent à jour après chaque exécution.</p>
+          <ul id="function-list"><li>Aucune fonction publique définie pour le moment.</li></ul>
+        </div>
+        <details>
+          <summary>Explorer l’état et exécuter du Python</summary>
+          <pre id="app-json">{}</pre>
+          <label for="app-code">Code dans le kernel partagé</label
+          ><textarea id="app-code" rows="3">
+app['counter'] += 1
+print(app)</textarea
+          ><button id="execute-code" type="button" disabled>
+            Exécuter depuis l’application
+          </button>
+          <pre id="app-output"></pre>
+        </details>
+      </section>
+      <section class="activity">
+        <div class="activity-heading">
+          <div>
+            <p class="eyebrow">CE QUI SE PASSE</p>
+            <h2>Activité de l’application</h2>
+          </div>
+          <span id="connection-count">0 connexion</span>
+        </div>
+        <ol id="journal">
+          <li class="quiet">
+            Les connexions, admissions et changements de droits apparaîtront
+            ici.
+          </li>
+        </ol>
+      </section>
+      <footer>
+        <span>Exemple intégrable · pa-gateway</span
+        ><span
+          >Identités de démo locales · Sessions en mémoire · Exécution
+          réelle</span
+        >
+      </footer>
+    </main>
+    <template id="user-template"
+      ><article class="user-card">
+        <div class="user-heading">
+          <span class="avatar"></span>
+          <div>
+            <h2></h2>
+            <span class="user-id"></span>
+          </div>
+          <span class="role"></span>
+        </div>
+        <div class="connection">
+          <span class="dot"></span
+          ><span class="connection-label">Déconnecté</span
+          ><button class="reconnect" type="button" disabled>Connecter</button>
+        </div>
+        <div class="messages" role="log" aria-live="polite">
+          <p class="empty">Créez une session pour commencer.</p>
+        </div>
+        <div class="thinking" hidden>L’agent travaille…</div>
+        <form class="composer">
+          <label class="sr-only">Message</label
+          ><textarea
+            rows="2"
+            placeholder="Demandez quelque chose à l’agent…"
+            disabled
+          ></textarea>
+          <div>
+            <button class="sample" type="button" disabled>Essayer Python</button
+            ><button class="send" type="submit" disabled>Envoyer ↑</button>
+          </div>
+        </form>
+      </article></template
+    >
+  </body>
+</html>

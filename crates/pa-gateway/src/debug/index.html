@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Prime Agent · Gateway Inspector</title>
+    <link rel="stylesheet" href="./inspector.css" />
+    <link rel="stylesheet" href="./trace.css" />
+    <script src="./inspector.js" defer></script>
+    <script src="./trace.js" defer></script>
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">
+        <span class="logo">P</span
+        ><span>Prime Agent<small>DEVELOPER TOOLS</small></span>
+      </div>
+      <div class="rail-label">OBSERVABILITY</div>
+      <nav aria-label="Inspector views">
+        <button class="nav" data-view="trace">Execution graph</button>
+        <button class="nav active" data-view="overview">
+          Overview <span>↗</span></button
+        ><button class="nav" data-view="requests">Requests</button
+        ><button class="nav" data-view="agents">Agents</button
+        ><button class="nav" data-view="connections">Connections</button>
+      </nav>
+      <div class="rail-bottom">
+        <span class="badge" id="capture-label">METADATA MODE</span>
+        <p id="capture-description">Execution capture is not configured.</p>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div class="eyebrow">GATEWAY / INSPECTOR</div>
+        <div class="heading">
+          <div>
+            <h1>Follow every exchange.</h1>
+            <p class="subtitle">
+              From the incoming prompt to the model, tools and kernel.
+            </p>
+          </div>
+          <div class="actions">
+            <span id="health" class="health">Connecting…</span
+            ><button id="pause" class="button">Pause</button
+            ><button id="export" class="button" disabled>Export JSON</button>
+          </div>
+        </div>
+      </header>
+      <form id="login" hidden>
+        <label for="token">Operator bearer token</label>
+        <div class="login-row">
+          <input
+            id="token"
+            type="password"
+            autocomplete="off"
+            placeholder="Your host’s operator credential"
+          /><button class="button primary" type="submit">Connect</button>
+        </div>
+        <p>
+          Used only in memory for this page. Normal gateway user credentials
+          must not grant operator access.
+        </p>
+      </form>
+      <div id="notice" role="status" hidden></div>
+      <section class="metrics" aria-label="Gateway activity">
+        <article>
+          <span>Requests received</span><strong id="total">—</strong
+          ><small>Since inspector activation</small>
+        </article>
+        <article>
+          <span>Live connections</span><strong id="streams">—</strong
+          ><small>Open event streams</small>
+        </article>
+        <article>
+          <span>Running agents</span><strong id="running">—</strong
+          ><small>Across connected workspaces</small>
+        </article>
+        <article>
+          <span>HTTP errors</span><strong id="errors">—</strong
+          ><small>In retained request history</small>
+        </article>
+      </section>
+      <div class="toolbar">
+        <div class="filters">
+          <label class="sr-only" for="search">Filter activity</label
+          ><input
+            id="search"
+            type="search"
+            placeholder="Filter by user, session, model, route…"
+          /><label class="sr-only" for="workspace">Workspace</label
+          ><select id="workspace">
+            <option value="">All workspaces</option>
+          </select>
+        </div>
+        <span id="updated" class="muted">Waiting for the first snapshot</span>
+      </div>
+      <section id="trace-panel" class="trace-panel" hidden>
+        <div class="panel-title">
+          <h2>Execution graph</h2>
+          <span class="muted"
+            >Click an exchange to inspect its captured data</span
+          >
+        </div>
+        <div id="flow-map" class="flow-map"></div>
+        <div class="trace-layout">
+          <div class="panel">
+            <div class="trace-toolbar">
+              <div>
+                <label class="sr-only" for="trace-session">Trace session</label
+                ><select id="trace-session">
+                  <option value="">All sessions</option>
+                </select>
+                <label class="sr-only" for="trace-kind">Trace boundary</label
+                ><select id="trace-kind">
+                  <option value="">All boundaries</option>
+                  <option value="http">Application / gateway</option>
+                  <option value="daemon">Daemon</option>
+                  <option value="worker">Worker</option>
+                  <option value="model">Model</option>
+                  <option value="kernel">Agent kernel</option>
+                  <option value="application_kernel">Application kernel</option>
+                </select>
+              </div>
+              <label
+                ><input id="trace-follow" type="checkbox" checked /> Follow
+                latest</label
+              >
+            </div>
+            <div id="trace-empty" class="trace-empty"></div>
+            <div id="trace-graph" class="trace-graph"></div>
+            <div class="trace-pagination">
+              <button id="trace-prev" class="button">Earlier</button
+              ><span id="trace-page"></span
+              ><button id="trace-next" class="button">Later</button>
+            </div>
+          </div>
+          <aside class="panel payload-panel">
+            <div class="panel-title">
+              <div>
+                <h2 id="payload-title">Captured payload</h2>
+                <div id="payload-meta" class="payload-meta">
+                  Select an exchange in the graph.
+                </div>
+              </div>
+              <button id="payload-download" class="button" disabled>
+                Download
+              </button>
+            </div>
+            <div class="payload-tabs">
+              <button class="active" data-payload-view="readable">
+                Readable</button
+              ><button data-payload-view="json">Full JSON</button>
+            </div>
+            <div id="payload-readable" class="payload-readable">
+              <pre>
+Prompts, model replies, tool calls and Python output appear here.</pre>
+            </div>
+            <pre id="payload-json" hidden></pre>
+          </aside>
+        </div>
+        <div class="capture-caption">
+          <span id="trace-status">Loading capture status…</span
+          ><span>Bounded local capture · credentials redacted</span>
+        </div>
+        <p class="trace-note">
+          Arrows show observed boundaries in timestamp order. Correlation IDs
+          pair requests and responses; order across processes alone does not
+          establish causality. Provider responses are normalized engine events.
+        </p>
+      </section>
+      <div class="layout" id="ordinary-layout">
+        <div class="panels">
+          <section class="panel" id="agents-panel">
+            <div class="panel-title">
+              <h2>Agents <span id="agent-count" class="count">0</span></h2>
+              <span class="muted"
+                >Live daemon roster · including subagents</span
+              >
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Agent / session</th>
+                    <th>Workspace</th>
+                    <th>Model</th>
+                    <th>Status</th>
+                    <th>Activity</th>
+                  </tr>
+                </thead>
+                <tbody id="agents-body"></tbody>
+              </table>
+            </div>
+            <div id="agents-empty" class="empty">
+              No agents yet. Start a session in your application.
+            </div>
+          </section>
+          <section class="panel" id="connections-panel" hidden>
+            <div class="panel-title">
+              <h2>Connected clients</h2>
+              <span class="muted"
+                >Authenticated users with an open event stream</span
+              >
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Tenant</th>
+                    <th>Session</th>
+                    <th>Connected for</th>
+                    <th>Request</th>
+                  </tr>
+                </thead>
+                <tbody id="connections-body"></tbody>
+              </table>
+            </div>
+            <div id="connections-empty" class="empty">
+              No open event streams. Agents can keep running after clients
+              disconnect.
+            </div>
+          </section>
+          <section class="panel" id="requests-panel">
+            <div class="panel-title">
+              <h2>Requests <span id="request-count" class="count">0</span></h2>
+              <span class="muted" id="retention">Latest 1,000 requests</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Request</th>
+                    <th>User</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody id="requests-body"></tbody>
+              </table>
+            </div>
+            <div id="requests-empty" class="empty">
+              Waiting for traffic. Send a message from your connected
+              application.
+            </div>
+          </section>
+        </div>
+        <aside class="activity-panel">
+          <div class="panel-title">
+            <h2>Activity</h2>
+            <span class="pulse"></span>
+          </div>
+          <div id="workspace-health"></div>
+          <ol id="events"></ol>
+          <p id="events-empty" class="empty">
+            Agent state changes will appear here.
+          </p>
+          <p class="footnote">
+            Last 500 transitions. Observation never interrupts an agent.
+          </p>
+        </aside>
+      </div>
+      <footer>
+        <span>Prime Agent Gateway Inspector</span
+        ><span id="uptime">Bounded history · capture sources shown above</span>
+      </footer>
+    </main>
+    <dialog id="detail">
+      <div class="panel-title">
+        <h2 id="detail-title">Details</h2>
+        <button id="close-detail" class="button">Close</button>
+      </div>
+      <pre id="detail-json"></pre>
+    </dialog>
+  </body>
+</html>

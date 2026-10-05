@@ -35,6 +35,8 @@ pub struct Gateway<S, P, R> {
     runtime: Arc<R>,
     shared: Arc<Shared>,
     telemetry: Option<TelemetryClient>,
+    #[cfg(feature = "debug")]
+    pub(crate) inspector: Option<crate::debug::Inspector>,
 }
 
 /// Process-local state shared by every clone of one gateway.
@@ -87,6 +89,8 @@ impl<S, P, R> Clone for Gateway<S, P, R> {
             runtime: Arc::clone(&self.runtime),
             shared: Arc::clone(&self.shared),
             telemetry: self.telemetry.clone(),
+            #[cfg(feature = "debug")]
+            inspector: self.inspector.clone(),
         }
     }
 }
@@ -100,6 +104,8 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
             runtime,
             shared: Arc::default(),
             telemetry: None,
+            #[cfg(feature = "debug")]
+            inspector: None,
         }
     }
 
@@ -107,6 +113,19 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
     #[must_use]
     pub fn with_telemetry(mut self, telemetry: TelemetryClient) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Record HTTP request metadata in the host's optional inspector. Set
+    /// telemetry first to emit the content-free inspector adoption event.
+    #[cfg(feature = "debug")]
+    #[must_use]
+    pub fn with_inspector(mut self, inspector: crate::debug::Inspector) -> Self {
+        self.track("gateway_inspector");
+        if inspector.traces_enabled() {
+            self.track("gateway_execution_trace");
+        }
+        self.inspector = Some(inspector);
         self
     }
 

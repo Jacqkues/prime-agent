@@ -3,6 +3,15 @@
 The session engine.
 
 ## Scope
+Opt-in local execution diagnostics (`diagnostics`): `enabled`, `record` and
+`record_bytes` observe engine/kernel/model boundaries and the daemon host's wire
+boundaries without changing their protocols. `PRIME_AGENT_DEBUG_TRACE_DIR` selects
+an existing absolute private Unix directory. The bounded asynchronous writer
+redacts structured credentials and rotates private JSONL segments. This is
+content-bearing developer capture, separate from adoption telemetry; hosting,
+operator authorization, retention across process lifetimes and visualization
+belong to the application/gateway.
+
 MCP host side (`mcp/`): auth gating for built-in integrations (the
 disabled-skill overrides and `/mcp list` status), the `mcpServers` settings
 seam, and the `mcp.*` host-request handlers the kernel's generic MCP

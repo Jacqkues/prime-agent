@@ -17,6 +17,7 @@ async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> 
     let bytes = line.len();
     writer.write_all(line.as_bytes()).await?;
     writer.flush().await?;
+    pa_core::diagnostics::record(pa_types::diagnostics::TracePoint::DaemonSend, value);
     Ok(bytes)
 }
 
@@ -27,6 +28,7 @@ async fn write_raw_line<W: AsyncWriteExt + Unpin>(writer: &mut W, line: &[u8]) -
     let bytes = line.len();
     writer.write_all(line).await?;
     writer.flush().await?;
+    pa_core::diagnostics::record_bytes(pa_types::diagnostics::TracePoint::DaemonSend, line);
     Ok(bytes)
 }
 
@@ -163,6 +165,7 @@ impl Supervisor {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    pa_core::diagnostics::record_bytes(pa_types::diagnostics::TracePoint::DaemonReceive, trimmed.as_bytes());
                     // The arm's guard proved a slot free (this loop is
                     // the only slot acquirer, and slots only free while
                     // the loop is between iterations), so the non-blocking

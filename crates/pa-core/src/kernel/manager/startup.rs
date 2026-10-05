@@ -363,6 +363,10 @@ impl Inner {
                                 let Some(inner) = inner.upgrade() else {
                                     return;
                                 };
+                                crate::diagnostics::record_bytes(
+                                    pa_types::diagnostics::TracePoint::KernelReceive,
+                                    trimmed.as_bytes(),
+                                );
                                 match parse_event(trimmed) {
                                     Ok(event) => inner.handle_event(event),
                                     Err(reason) => {

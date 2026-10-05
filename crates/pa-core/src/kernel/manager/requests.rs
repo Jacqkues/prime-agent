@@ -253,6 +253,10 @@ impl ReplKernelManager {
                 };
                 stdin.write_all(line.as_bytes()).await?;
                 stdin.flush().await?;
+                crate::diagnostics::record_bytes(
+                    pa_types::diagnostics::TracePoint::KernelSend,
+                    line.as_bytes(),
+                );
                 Ok(())
             })
         };

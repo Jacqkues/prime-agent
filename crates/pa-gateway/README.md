@@ -10,6 +10,7 @@ Tenant-scoped session access, many-to-many membership, owner/contributor/viewer
 permissions, attributed prompt admission, cancellation, closure and authorized
 event subscriptions. The native daemon adapter uses its existing JSONL protocol
 and follow-up queue. ACP is a separate stdio interface.
+Optional process-local diagnostics cover HTTP exchanges and native agent rosters.
 
 ## Non-goals
 
@@ -30,6 +31,8 @@ gateway access; they do not sandbox code executed by an agent.
 - `MemoryStore`: ephemeral reference adapter for local development and tests.
 - `EventStream`, `Error`, `Result`: streams and service outcomes.
 - Optional `http::{Authenticator, router}`: credential validation and Axum routes.
+- Optional `debug::{Inspector, DebugWatch, TraceSource, TraceWatch, router}`: bounded operational snapshots,
+  native roster observation and an embeddable operator dashboard.
 
 Shared vocabulary lives in `pa-types::gateway`, without re-exports here. Internals
 stay private. Workspace dependencies are only `pa-types` and `pa-telemetry`.
@@ -75,6 +78,143 @@ inputs, never HTTP inputs. To embed, construct
 `Gateway::new(Arc<Store>, Arc<Policy>, Arc<Runtime>)` and mount
 `http::router(gateway, Arc<Authenticator>)` under your existing router. Rust-only
 applications call the service methods with a verified `Principal`.
+
+## Private sessions with a shared application kernel
+
+```sh
+cargo run -p pa-gateway --features debug --example multi_user -- \
+  /absolute/host-config.json 127.0.0.1:3032 /absolute/kernel-venv/bin/python
+```
+
+The Python interpreter must already contain `prime-agent-runtime`. Open
+`http://127.0.0.1:3032/`. Solo mode opens Alice's private session; multi-session
+mode opens separate sessions for Alice, Bob and Camille. Their prompts,
+histories and agent kernels remain session-scoped. They are **not** added as
+members of each other's conversations.
+
+One application-owned `python -m rlm.repl` process, using the same Prime Agent
+runtime, holds the shared Python namespace. The executable `app-kernel` skill
+connects each private agent to this process. Alice can create an object, Bob can
+modify it, and the frontend renders `app` after each execution. The frontend can
+also execute a cell directly through the authenticated application API. Closing
+one chat does not dispose the shared kernel; restarting the demo resets it.
+
+The host builds a live function catalog after each cell. Public top-level functions
+defined in the application namespace appear with their signatures, docstrings and
+sync/async kind. Redefinitions replace entries and deletions remove them, including
+after a cell partially fails. Imported functions, private names, classes and methods
+are excluded. Defaults are masked as `Ellipsis` and annotations omitted so rendering
+metadata cannot invoke their `repr` or copy application values into another context.
+
+The frontend sends messages through the example host's
+`POST /app/sessions/{id}/prompts` route. The server adds a current, bounded catalog
+recap (20 entries / 8 KiB metadata) and the caller's connection context, then calls
+`Gateway::prompt`. This host route retains gateway authorization and idempotency.
+The generic `/agents` API remains unchanged; embedding hosts explicitly adopt the
+context enrichment in [`application.rs`](examples/multi_user/application.rs).
+Catalog text is marked as application data, never instructions. Prompts/history,
+function bodies, defaults and application values are not included in the recap.
+
+Agents can call `await client.catalog()` (authenticated
+`GET /app/kernel/catalog?session_id=...`) for the latest snapshot; each execution
+also returns one. The skill requires checking it before defining/replacing a
+function and encourages reuse and docstrings. The frontend displays the catalog
+beside application state. The complete snapshot is capped at 128 entries / 48 KiB
+entry metadata and reports truncation/errors explicitly. A snapshot includes the
+kernel ID and revision; it is not a lock or a guarantee against duplicate logic.
+Background mutations appear at the next completed cell. Metadata is shared
+application content: do not put private prompts or credentials in docstrings.
+
+The host serializes cells in a bounded queue and never retries code. Agent
+prompts and history are not implicitly copied to the shared namespace. The
+application kernel is separate from the private agent kernels and has no agent
+host (`rlm.spawn`, conversation operations). This separation keeps application
+state lifetime independent from conversations. Shared Python access is a trusted
+workspace execution capability, not an OS sandbox between mutually hostile users.
+
+Source: [`examples/multi_user.rs`](examples/multi_user.rs), its
+[kernel host](examples/multi_user/kernel.rs), [Python skill](examples/multi_user/app-kernel/SKILL.md)
+and dependency-free [frontend](examples/multi_user/index.html). The gateway
+library still has no dependency on the engine. Applications can replace the
+example's state projection, authentication and storage while using the same
+HTTP/session and diagnostic APIs.
+
+The demo mints local credentials and private connection files; configured
+application credentials are never exposed. It binds loopback, validates
+Host/Origin/fetch-site and refuses kernel execution against another user's
+private session. `/demo/users` is intentionally a local developer bootstrap,
+not production login. `/inspect/` is an operator view of all traces, including
+private prompts when capture is enabled. Normal users must not receive it.
+
+## Gateway Inspector
+
+Enable the `debug` feature and opt in when starting the local example:
+
+```sh
+cargo run -p pa-gateway --features debug --example embedded -- \
+  /absolute/host-config.json 127.0.0.1:3030 --debug 127.0.0.1:3031
+```
+
+Open `http://127.0.0.1:3031/`. The dashboard refreshes every second and shows:
+
+- HTTP requests, verified user/tenant, session, response status, time to headers
+  and full response duration. Open SSE bodies remain visible as connections;
+  disconnecting a client does not imply the agent stopped.
+- Main agents and subagents, parent runtime IDs, model/provider, current activity
+  and status from the daemon's native roster. This includes existing runtime
+  sessions even when no gateway chat stream is open.
+- Workspace observer connectivity, a transition timeline, filtering, individual
+  request/agent details, pause/resume and JSON export of the current snapshot.
+
+The inspector makes no execution mutations. In its default metadata mode,
+only allowlisted roster metadata and HTTP timings are retained; path-bearing
+roster keys become opaque IDs. Connections mean open HTTP event streams, not
+browser presence or TCP connection counts.
+
+For prompts, daemon/worker frames, model payloads and Python execution, enable
+[execution capture and its sequence graph](src/debug/README.md). This explicit
+option records content in private local files and adds authenticated trace APIs.
+It is independent of adoption telemetry and requires rebuilding/restarting the
+Rust daemon and workers with the recorder enabled.
+
+Capture is bounded to 1,000 HTTP exchanges, 500 transitions, 64 workspaces and
+2,000 agents per workspace. Counters still include evicted HTTP entries; agent
+truncation is explicit. Completed requests are evicted before active ones. If
+more than 1,000 requests remain open, some connection details are omitted while
+the global counters remain accurate. Metadata resets on process restart; explicit execution capture can reload its retained files.
+Observer failures retain last-known agent data **marked stale**, then reconnect
+with capped backoff; they never retry prompts or affect running agents.
+
+For an embedding host:
+
+```rust,ignore
+let inspector = pa_gateway::debug::Inspector::default();
+let observation = inspector.watch_daemon(&runtime)?; // Arc<DaemonRuntime>
+let gateway = Gateway::new(store, policy, runtime)
+    .with_telemetry(host_telemetry)
+    .with_inspector(inspector.clone());
+let app = axum::Router::new()
+    .nest("/agents", pa_gateway::http::router(gateway, user_auth))
+    .nest("/inspect", pa_gateway::debug::router(inspector, operator_auth));
+// Serve app, keeping observation alive. Open /inspect/ (trailing slash).
+```
+
+`Inspector::snapshot()` exposes the same typed `pa-types::gateway::debug` data
+for a host's own UI. HTTP recording works with every `Runtime`; the supplied
+agent observer requires `DaemonRuntime`. Dropping `DebugWatch` stops observation
+and marks its workspaces stopped. The host must provide separate **operator**
+authorization: the inspector intentionally sees all configured tenants and must
+never use ordinary participant credentials as admin access. `/snapshot`, `/trace/events` and `/trace/events/{id}` check
+that authorization on every request; the static page has no embedded data, accepts
+an optional bearer credential kept only in page memory, and does not load CDNs.
+
+The example's separate debug listener refuses non-loopback addresses. Its local
+operator adapter checks Host, Origin, fetch-site and a non-simple request header,
+and supplies no CORS allowance, preventing a foreign web page from fetching local
+diagnostics. Any local process can read this intentionally local developer
+endpoint. Replace that adapter with real operator authentication before embedding
+the dashboard on a shared host; do not reverse-proxy the local example publicly.
+Without `--debug`, the example opens no debug listener or roster subscription.
 
 ## Executable application extensions
 
@@ -236,6 +376,9 @@ Opt in with a host-owned `TelemetryClient` through `with_telemetry`. Creation,
 sharing, ownership transfer and prompt admission emit `agent feature outcome`
 with `gateway_session`, `gateway_share`, `gateway_transfer` and `gateway_prompt`,
 a random feature ID and `completed` outcome. Idempotent replays emit nothing.
+Enabling `with_inspector` after `with_telemetry` emits `gateway_inspector` (and
+`gateway_execution_trace` when content collection is enabled) through
+the same versioned adoption schema. Debug snapshots are not sent to telemetry.
 No participant, tenant, session, content, path or credential enters these events.
 
 ## Verification and parity
@@ -261,3 +404,45 @@ evidence, not a comparison with the TS binary or real-provider behavior.
 `make check` stopped at the pre-existing macOS `must_use_candidate` lint in
 `pa-core/src/platform/process.rs:327`; the remaining workspace gates did not run.
 `make deny` could not run because `cargo-deny` is not installed.
+
+Inspector validation on 2026-10-02: all 19 gateway tests and all-feature Clippy
+passed, including streaming-body lifetime, operator authorization, credential
+exclusion, bounded history, native roster subscription and observer replacement.
+The default-feature build also passed. A real local daemon/provider run confirmed
+authenticated connection tracking, Python tool execution, runtime transitions,
+HTTP error recording and disconnect cleanup; the dashboard, filters and request
+details were checked in Chrome. Six live local-access checks covered foreign
+Host/Origin/fetch-site rejection and allowed loopback access. `make check` still
+stops at the same unrelated `pa-core` lint above. This is a new opt-in operator
+surface with new public inspector types/methods; it adds no dependency package,
+no model tool and no daemon wire identifier. It is not TS parity-diff evidence.
+
+Execution capture and shared-kernel validation on 2026-10-03: gateway all-feature
+and default-feature suites passed; the additional same-timestamp ordering
+regression passed. All-feature gateway Clippy and workspace fmt passed. Recorder
+and request-timing tests passed, including a real-kernel regression for queued
+execute requests and their correlated stdout. A live two-agent run verified the
+same application Python process/object across private sessions, serialized
+concurrent mutations, one agent modifying the other's application object,
+separate model contexts, denied cross-session access, and application state
+surviving chat closure. Native model prompts and Python cells were inspected in
+the graph in Chrome. Chrome blocked automatic navigation to the new demo port
+3032, so frontend interaction verification remains limited; its live HTTP/API
+flow was exercised directly. `make check` still stops at the pre-existing macOS
+lint described above; no TS visual parity claim is made for these new examples.
+
+Function-catalog validation on 2026-10-05: all-feature gateway tests and Clippy
+passed, as did four Python projection regressions and the real-kernel example
+test (run with `PA_APP_KERNEL_PYTHON=/absolute/kernel-python cargo test -p
+pa-gateway --example multi_user --features debug --locked -- --ignored`). The
+regressions cover definitions, aliases, redefinition/deletion, partially failed
+cells, broken app projection, metadata bounds and avoiding default-value `repr`.
+A live provider run confirmed that the very first request includes the host recap,
+the second user's agent calls `client.catalog()` and reuses the first user's
+function with unchanged Python object identity. Authorization, idempotent prompt
+admission and closed-session denial passed. No library API, daemon protocol or
+dependency changed; host-example routes and the telemetry feature vocabulary grew.
+The local demo with this feature runs on port 3033 because an open session on 3032
+prevented a safe restart. Chrome also blocked automatic navigation to 3033, so
+frontend visual verification remains unavailable. `make check` still stops at
+the pre-existing `pa-core/src/platform/process.rs:327` lint above.

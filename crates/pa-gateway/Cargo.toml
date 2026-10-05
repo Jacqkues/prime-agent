@@ -8,6 +8,7 @@ description = "Embeddable, multi-user access to Prime Agent sessions."
 [features]
 default = []
 http = ["dep:axum"]
+debug = ["http", "axum/matched-path"]
 
 [dependencies]
 pa-types.workspace = true
@@ -30,6 +31,10 @@ tower = { version = "0.5", features = ["util"] }
 [[example]]
 name = "embedded"
 required-features = ["http"]
+
+[[example]]
+name = "multi_user"
+required-features = ["debug"]
 
 [lints]
 workspace = true

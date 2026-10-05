@@ -15,6 +15,7 @@
 
 pub mod ai;
 pub mod daemon;
+pub mod diagnostics;
 pub mod gateway;
 pub mod goal;
 pub mod incident;

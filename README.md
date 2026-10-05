@@ -109,6 +109,11 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 For embedding shared agent sessions in your own application, see
 [pa-gateway](crates/pa-gateway/README.md). It provides a Rust library and an optional
 HTTP/SSE router with host-supplied authentication, storage and runtime adapters.
+Its optional [Gateway Inspector](crates/pa-gateway/README.md#gateway-inspector)
+shows requests, connected clients and live agent activity in a local dashboard.
+Explicit execution capture adds a graph of prompts, daemon/worker exchanges and
+Python execution. The [shared-kernel example](crates/pa-gateway/README.md#private-sessions-with-a-shared-application-kernel)
+connects private agent sessions to one persistent application Python namespace.
 
 ## Contributing
 

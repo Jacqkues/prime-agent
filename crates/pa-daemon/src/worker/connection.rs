@@ -449,6 +449,13 @@ impl Worker {
                 .to_string();
             let mut payload: Value = serde_json::from_slice(&frame.payload)
                 .with_context(|| format!("invalid worker command JSON for {command_type}"))?;
+            if pa_core::diagnostics::enabled() {
+                pa_core::diagnostics::record(
+                    pa_types::diagnostics::TracePoint::WorkerReceive,
+                    &serde_json::json!({"id": request_id, "header":frame.header, "command":command_type, "data":payload}),
+                );
+            }
+
             if std::env::var("PA_DAEMON_DEBUG").is_ok() {
                 eprintln!("[worker {}] got command {command_type}", std::process::id());
             }
@@ -695,7 +702,9 @@ impl Worker {
         let mut guard = writer.lock().await;
         write_frame(&mut *guard, header, payload, DEFAULT_PRIVATE_FRAME_LIMITS)
             .await
-            .context("write private frame")
+            .context("write private frame")?;
+        pa_core::diagnostics::record_bytes(pa_types::diagnostics::TracePoint::WorkerSend, payload);
+        Ok(())
     }
 
     /// Write a frame whose payload skips the whole-frame re-buffer (see
@@ -710,7 +719,9 @@ impl Worker {
         let mut guard = writer.lock().await;
         write_frame_segments(&mut *guard, header, payload, DEFAULT_PRIVATE_FRAME_LIMITS)
             .await
-            .context("write private frame")
+            .context("write private frame")?;
+        pa_core::diagnostics::record_bytes(pa_types::diagnostics::TracePoint::WorkerSend, payload);
+        Ok(())
     }
 
     /// Write one command response. The response is CONSUMED: its trees and

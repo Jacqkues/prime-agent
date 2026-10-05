@@ -497,6 +497,10 @@ pub const FEATURE_NAMES: &[&str] = &[
     "gateway_share",
     "gateway_transfer",
     "gateway_prompt",
+    "gateway_inspector",
+    "gateway_execution_trace",
+    "gateway_shared_kernel",
+    "gateway_kernel_catalog",
 ];
 
 /// The #2117 feature outcomes.

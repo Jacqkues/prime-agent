@@ -381,6 +381,8 @@ async fn adoption_events_do_not_contain_session_or_participant_content() {
     config.sinks = vec![sink.clone()];
     let client = pa_telemetry::TelemetryClient::spawn(config).unwrap();
     let gateway = gateway.with_telemetry(client.clone());
+    #[cfg(feature = "debug")]
+    let gateway = gateway.with_inspector(pa_gateway::debug::Inspector::default());
     let alice = user("private-tenant", "private-user");
     let session = gateway
         .create(alice.clone(), "project".into())
@@ -408,6 +410,8 @@ async fn adoption_events_do_not_contain_session_or_participant_content() {
     assert_eq!(
         features,
         vec![
+            #[cfg(feature = "debug")]
+            json!("gateway_inspector"),
             json!("gateway_session"),
             json!("gateway_share"),
             json!("gateway_prompt")

@@ -28,6 +28,7 @@ impl Inner {
         line.push('\n');
         stdin.write_all(line.as_bytes()).await?;
         stdin.flush().await?;
+        crate::diagnostics::record(pa_types::diagnostics::TracePoint::KernelSend, frame);
         Ok(())
     }
 

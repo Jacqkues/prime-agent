@@ -71,6 +71,7 @@ pub mod agent_traces;
 pub mod auth;
 pub mod autonomous;
 pub mod cron;
+pub mod diagnostics;
 pub mod export_html;
 pub mod goals;
 pub mod kernel;
