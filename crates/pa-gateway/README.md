@@ -19,7 +19,8 @@ gateway access; they do not sandbox code executed by an agent.
 
 ## Public API and dependencies
 
-- `Gateway<S, P, R>`: create/list/read/share/revoke/prompt/cancel/close/subscribe.
+- `Gateway<S, P, R>`: create/list/read/share/revoke/prompt/cancel/close/subscribe
+  and `metrics()` counters.
 - `SessionStore`: host persistence with atomic revision checks.
 - `WorkspacePolicy`: current workspace authorization and admission checks.
 - `Runtime`: host execution boundary, with `DaemonRuntime` supplied.
@@ -110,7 +111,12 @@ require authentication; request bodies reject unknown fields.
 | `POST /sessions/{id}/prompts` | `{"text":"Investigate this bug"}` → 202 admission receipt |
 | `POST /sessions/{id}/cancel` | Stop current run; owner only; queued inputs follow daemon semantics |
 | `DELETE /sessions/{id}` | Fence new gateway actions and stop runtime; owner only |
-| `GET /sessions/{id}/events` | SSE snapshot followed by runtime events |
+| `GET /sessions/{id}/events` | SSE snapshot followed by runtime events; optional `Last-Event-ID` |
+
+Errors are `{"error": <message>, "code": <stable code>}`. Codes distinguish
+responses sharing a status: 409 is `conflict` or `not_ready`; 413
+`too_large`; 429 `limit_exceeded`; 503 `storage_unavailable`; 502
+`runtime_unavailable` (outcome unknown, do not blindly retry).
 
 SSE provides streaming while writes use ordinary HTTP. Use streaming `fetch` for
 bearer headers; browser `EventSource` cannot set them. Cookie-based host auth
@@ -126,11 +132,18 @@ if (!response.ok) throw new Error(`Admission failed: ${response.status}`);
 const { request_id } = await response.json(); // admitted, not completed
 ```
 
-SSE uses `event: runtime`, first with
-`{"type":"snapshot","data":<daemon attach result>}`, then native session frames.
-Apply the snapshot and use native event sequence metadata for ordering and
-deduplication. Reconnect starts a fresh snapshot; there is no gateway replay
-journal or `Last-Event-ID` contract. `event: error` terminates the stream.
+SSE uses `event: runtime` with a versioned envelope
+`{"v":1,"kind":"snapshot"|"event","cursor":{"generation","sequence"}|null,"data":…}`.
+The first frame is a `snapshot` whose `data` is the daemon attach result; later
+`event` frames carry native session frames in `data`. Frames with a cursor have
+SSE `id: <generation>:<sequence>`. On reconnect, send `Last-Event-ID`: the stream
+starts with a fresh snapshot (apply it as the new state), then skips events at or
+before that cursor in the same generation. There is no gateway replay journal:
+reconnection converges state rather than replaying every frame. `event: error`
+carries `{error, code}` and terminates the stream.
+
+Every session member, viewers included, receives every frame, including tool
+output. Restrict who joins a session if that is not acceptable.
 
 ## Collaboration and trust boundary
 
@@ -151,10 +164,14 @@ host responsibilities. Code running in one workspace shares that execution trust
 boundary: session ACLs alone do not protect files from other agents in that
 workspace. Use separate execution environments when stronger isolation is needed.
 
-Membership is checked before each delivered event and every 15 seconds while
-idle. HTTP authentication is checked before each SSE event. Revocation stops
-subsequent delivery; previously authorized work/data cannot be recalled. Dropping
-a subscription never cancels the agent.
+Open subscriptions are not re-authorized per event. A membership or status change
+made through this gateway process stops affected streams before their next
+event. Workspace policy changes and changes made by other gateway instances
+apply within 5 seconds. HTTP credentials are re-verified before an SSE event at
+most every `Authenticator::stream_revalidation()` (default 5 seconds; return
+zero to check every event). Revocation stops subsequent delivery; previously
+authorized work/data cannot be recalled. Dropping a subscription never cancels
+the agent.
 
 ## Persistence and failure handling
 
@@ -176,6 +193,10 @@ hide successful admission. There are no automatic mutation retries or
 exactly-once guarantees; reconcile history before resubmitting. Runtime recovery
 and queue durability are execution-adapter responsibilities.
 
+`Gateway::metrics()` returns process-local counters (sessions created/failed,
+prompts admitted/failed, runtime errors, active subscriptions, access
+rechecks, revoked streams) for the host's metrics exporter.
+
 The host supplies TLS, CORS/CSRF policy, rate/concurrency limits, retention and
 credential rotation. `WorkspacePolicy` provides admission quota checks. Hard
 token budgets, subagent accounting and stopping work need runtime-side budget
@@ -193,7 +214,8 @@ No participant, tenant, session, content, path or credential enters these events
 
 Run `make gateway-check`, `make check` and `make deny`. Focused tests cover access,
 roles, revocation, atomic metadata updates, attribution, HTTP impersonation,
-stream revocation, telemetry privacy and native daemon commands/handshake.
+stream revocation and recheck cost, resume, telemetry privacy and native
+daemon commands/handshake.
 
 This opt-in surface leaves existing CLI, TUI, ACP and daemon schemas unchanged.
 Native identifiers such as `prime-agent.daemon` and command names are preserved.

@@ -1,17 +1,26 @@
+#![allow(dead_code)] // Each integration test binary uses a different subset.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use futures::{stream, StreamExt};
 use pa_gateway::{Error, EventStream, Gateway, MemoryStore, Result, Runtime, WorkspacePolicy};
-use pa_types::gateway::{AttributedPrompt, GatewayAction, Principal, StoredSession, Workspace};
+use pa_types::gateway::{
+    AttributedPrompt, EventCursor, GatewayAction, Principal, RuntimeEvent, RuntimeEventKind,
+    StoredSession, Workspace,
+};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
 #[derive(Default)]
 pub struct Policy {
     pub denied: RwLock<BTreeSet<String>>,
+    pub checks: AtomicUsize,
 }
 
 impl WorkspacePolicy for Policy {
@@ -21,6 +30,7 @@ impl WorkspacePolicy for Policy {
         workspace: &Workspace,
         _action: GatewayAction,
     ) -> Result<()> {
+        self.checks.fetch_add(1, Ordering::Relaxed);
         if principal.tenant_id == workspace.tenant_id
             && workspace.workspace_id == "project"
             && !self.denied.read().await.contains(&principal.user_id)
@@ -35,7 +45,7 @@ impl WorkspacePolicy for Policy {
 #[derive(Default)]
 pub struct Agent {
     pub prompts: Mutex<Vec<AttributedPrompt>>,
-    pub events: Mutex<BTreeMap<String, broadcast::Sender<Value>>>,
+    pub events: Mutex<BTreeMap<String, broadcast::Sender<RuntimeEvent>>>,
     pub closed: Mutex<Vec<String>>,
     pub admission_gate: Mutex<Option<AdmissionGate>>,
 }
@@ -51,7 +61,7 @@ impl Runtime for Agent {
         self.events
             .lock()
             .await
-            .insert(id.to_owned(), broadcast::channel(16).0);
+            .insert(id.to_owned(), broadcast::channel(256).0);
         Ok(id.to_owned())
     }
 
@@ -101,7 +111,7 @@ impl Runtime for Agent {
             ))
         });
         Ok(Box::pin(
-            stream::once(async { Ok(json!({"type": "snapshot"})) }).chain(events),
+            stream::once(async { Ok(snapshot()) }).chain(events),
         ))
     }
 }
@@ -124,5 +134,34 @@ pub fn user(tenant: &str, user: &str) -> Principal {
     Principal {
         tenant_id: tenant.to_owned(),
         user_id: user.to_owned(),
+    }
+}
+
+pub fn snapshot() -> RuntimeEvent {
+    RuntimeEvent {
+        kind: RuntimeEventKind::Snapshot,
+        cursor: None,
+        data: json!({"type": "snapshot"}),
+    }
+}
+
+/// A runtime event without a cursor.
+pub fn event(data: Value) -> RuntimeEvent {
+    RuntimeEvent {
+        kind: RuntimeEventKind::Event,
+        cursor: None,
+        data,
+    }
+}
+
+/// A runtime event at `sequence` in generation `g1`.
+pub fn sequenced(sequence: u64, data: Value) -> RuntimeEvent {
+    RuntimeEvent {
+        kind: RuntimeEventKind::Event,
+        cursor: Some(EventCursor {
+            generation: "g1".into(),
+            sequence,
+        }),
+        data,
     }
 }

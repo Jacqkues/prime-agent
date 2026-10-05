@@ -8,7 +8,10 @@ use pa_gateway::{
 };
 use pa_types::{
     daemon::{DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION},
-    gateway::{GatewayAction, Principal, Workspace},
+    gateway::{
+        EventCursor, GatewayAction, Principal, RuntimeEvent, RuntimeEventKind, SubscribeFrom,
+        Workspace,
+    },
     platform::transport::{bind_transport, AsyncWriteHalf},
 };
 use serde_json::{json, Value};
@@ -38,6 +41,8 @@ async fn send(writer: &mut dyn AsyncWriteHalf, value: Value) {
 }
 
 #[tokio::test]
+// One scripted daemon conversation covers the whole command sequence in order.
+#[allow(clippy::too_many_lines)]
 async fn native_daemon_commands_preserve_attribution_queueing_and_snapshot_order() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("daemon.sock");
@@ -71,14 +76,14 @@ async fn native_daemon_commands_preserve_attribution_queueing_and_snapshot_order
                 json!({"name": DAEMON_PROTOCOL_NAME, "version": DAEMON_PROTOCOL_VERSION})
             );
             let data = if expected == "create" || expected == "attach" {
-                json!({"activeSessionId": "worker-1", "messages": []})
+                json!({"activeSessionId": "worker-1", "messages": [], "lastEventCursor": {"generation": "g1", "sequence": 4}})
             } else {
                 Value::Null
             };
             send(&mut *writer, json!({"type": "response", "id": request["id"], "command": expected, "success": true, "data": data})).await;
             if expected == "attach" {
                 send(&mut *writer, json!({"type": "session_event", "activeSessionId": "foreign", "event": {"secret": true}})).await;
-                send(&mut *writer, json!({"type": "session_event", "activeSessionId": "worker-1", "event": {"text": "answer"}})).await;
+                send(&mut *writer, json!({"type": "session_event", "activeSessionId": "worker-1", "event": {"text": "answer"}, "meta": {"cursor": {"generation": "g1", "sequence": 5}}})).await;
             }
             received.push(request["command"].clone());
         }
@@ -102,16 +107,30 @@ async fn native_daemon_commands_preserve_attribution_queueing_and_snapshot_order
         .await
         .unwrap();
     let mut stream = gateway
-        .subscribe(alice.clone(), session.id.clone())
+        .subscribe(alice.clone(), session.id.clone(), SubscribeFrom::Start)
         .await
         .unwrap();
+    let cursor = |sequence| {
+        Some(EventCursor {
+            generation: "g1".into(),
+            sequence,
+        })
+    };
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        json!({"type": "snapshot", "data": {"activeSessionId": "worker-1", "messages": []}})
+        RuntimeEvent {
+            kind: RuntimeEventKind::Snapshot,
+            cursor: cursor(4),
+            data: json!({"activeSessionId": "worker-1", "messages": [], "lastEventCursor": {"generation": "g1", "sequence": 4}}),
+        }
     );
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        json!({"type": "session_event", "activeSessionId": "worker-1", "event": {"text": "answer"}})
+        RuntimeEvent {
+            kind: RuntimeEventKind::Event,
+            cursor: cursor(5),
+            data: json!({"type": "session_event", "activeSessionId": "worker-1", "event": {"text": "answer"}, "meta": {"cursor": {"generation": "g1", "sequence": 5}}}),
+        }
     );
     assert!(matches!(stream.next().await, Some(Err(Error::Runtime(_)))));
     assert!(stream.next().await.is_none());

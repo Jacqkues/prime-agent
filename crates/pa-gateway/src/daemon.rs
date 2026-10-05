@@ -6,7 +6,9 @@ use std::{
 
 use pa_types::{
     daemon::{DaemonCommand, DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION},
-    gateway::{AttributedPrompt, StoredSession, Workspace},
+    gateway::{
+        AttributedPrompt, EventCursor, RuntimeEvent, RuntimeEventKind, StoredSession, Workspace,
+    },
     platform::transport::{connect_transport, AsyncReadHalf, AsyncWriteHalf},
 };
 use serde_json::{json, Value};
@@ -154,32 +156,43 @@ impl Runtime for DaemonRuntime {
             .unwrap_or(&id)
             .to_owned();
         pending.retain(|frame| frame["activeSessionId"].as_str() == Some(&id));
-        pending.push_front(json!({"type": "snapshot", "data": snapshot}));
+        let snapshot = RuntimeEvent {
+            kind: RuntimeEventKind::Snapshot,
+            cursor: cursor(snapshot.get("lastEventCursor")),
+            data: snapshot,
+        };
         Ok(Box::pin(futures::stream::unfold(
-            Some((connection, pending, id)),
+            Some((connection, pending, id, Some(snapshot))),
             |state| async move {
-                let (mut connection, mut pending, id) = state?;
+                let (mut connection, mut pending, id, snapshot) = state?;
+                if let Some(snapshot) = snapshot {
+                    return Some((Ok(snapshot), Some((connection, pending, id, None))));
+                }
                 loop {
-                    if let Some(frame) = pending.pop_front() {
-                        return Some((Ok(frame), Some((connection, pending, id))));
+                    let frame = match pending.pop_front() {
+                        Some(frame) => frame,
+                        None => match connection.read().await {
+                            Ok(frame) => frame,
+                            Err(error) => return Some((Err(error), None)),
+                        },
+                    };
+                    if frame["activeSessionId"].as_str() == Some(&id) {
+                        let closed = frame["type"] == "session_closed";
+                        let event = RuntimeEvent {
+                            kind: RuntimeEventKind::Event,
+                            cursor: cursor(frame.pointer("/meta/cursor")),
+                            data: frame,
+                        };
+                        return Some((
+                            Ok(event),
+                            (!closed).then_some((connection, pending, id, None)),
+                        ));
                     }
-                    match connection.read().await {
-                        Ok(frame) => {
-                            if frame["activeSessionId"].as_str() == Some(&id) {
-                                let closed = frame["type"] == "session_closed";
-                                return Some((
-                                    Ok(frame),
-                                    (!closed).then_some((connection, pending, id)),
-                                ));
-                            }
-                            if frame["type"] == "daemon_closing" {
-                                return Some((
-                                    Err(Error::Runtime(anyhow::anyhow!("daemon closing"))),
-                                    None,
-                                ));
-                            }
-                        }
-                        Err(error) => return Some((Err(error), None)),
+                    if frame["type"] == "daemon_closing" {
+                        return Some((
+                            Err(Error::Runtime(anyhow::anyhow!("daemon closing"))),
+                            None,
+                        ));
                     }
                 }
             },
@@ -189,6 +202,11 @@ impl Runtime for DaemonRuntime {
 
 fn runtime_id(record: &StoredSession) -> Result<&str> {
     record.runtime_id.as_deref().ok_or(Error::NotReady)
+}
+
+/// The daemon's `{generation, sequence}` event cursor, when present.
+fn cursor(value: Option<&Value>) -> Option<EventCursor> {
+    value.and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 struct Connection {

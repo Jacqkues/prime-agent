@@ -24,6 +24,7 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "json
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [[example]]
