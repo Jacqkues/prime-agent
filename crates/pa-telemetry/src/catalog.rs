@@ -495,6 +495,7 @@ pub const FEATURE_NAMES: &[&str] = &[
     "feedback",
     "gateway_session",
     "gateway_share",
+    "gateway_transfer",
     "gateway_prompt",
 ];
 

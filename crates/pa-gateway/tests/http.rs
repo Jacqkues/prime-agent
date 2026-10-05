@@ -249,6 +249,38 @@ async fn http_contract_versions_events_resumes_and_reports_stable_codes() {
         json!({"error": "request is too large", "code": "too_large"})
     );
 
+    let mut receipts = Vec::new();
+    for _ in 0..2 {
+        let mut keyed = request(
+            "POST",
+            &format!("{base}/prompts"),
+            "Bearer key",
+            &json!({"text": "once"}),
+        );
+        keyed
+            .headers_mut()
+            .insert("idempotency-key", "retry-1".parse().unwrap());
+        let response = app.clone().oneshot(keyed).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        receipts.push(body(response).await);
+    }
+    assert_eq!(receipts[0], receipts[1]);
+    assert_eq!(agent.prompts.lock().await.len(), 1);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/sessions?limit=1",
+            "Bearer key",
+            &Value::Null,
+        ))
+        .await
+        .unwrap();
+    let listed = body(response).await;
+    assert_eq!(listed["sessions"][0]["id"], json!(session.id));
+    assert_eq!(listed["next"], Value::Null);
+
     let mut resume = request("GET", &format!("{base}/events"), "Bearer key", &Value::Null);
     resume
         .headers_mut()

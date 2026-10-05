@@ -19,10 +19,11 @@ gateway access; they do not sandbox code executed by an agent.
 
 ## Public API and dependencies
 
-- `Gateway<S, P, R>`: create/list/read/share/revoke/prompt/cancel/close/subscribe
-  and `metrics()` counters.
-- `SessionStore`: host persistence with atomic revision checks.
-- `WorkspacePolicy`: current workspace authorization and admission checks.
+- `Gateway<S, P, R>`: create/list/read/share/transfer/revoke/prompt/cancel/close/
+  subscribe, workspace administration listing and `metrics()` counters.
+- `SessionStore`: host persistence with atomic revision checks, keyset-paginated
+  listing and durable prompt idempotency keys.
+- `WorkspacePolicy`: current workspace authorization, administration and admission checks.
 - `Runtime`: host execution boundary, with `DaemonRuntime` supplied (workspace
   routes can be registered and unregistered while running).
 - `DaemonEndpoint`: trusted socket, create configuration and subscription limit per workspace.
@@ -59,7 +60,7 @@ with your application's verified identity before deployment. Example host config
     "max_subscriptions": 64
   }],
   "users": [
-    {"token": "replace-with-alice-secret", "principal": {"tenant_id": "acme", "user_id": "alice"}, "workspaces": ["engineering"]},
+    {"token": "replace-with-alice-secret", "principal": {"tenant_id": "acme", "user_id": "alice"}, "workspaces": ["engineering"], "administers": ["engineering"]},
     {"token": "replace-with-bob-secret", "principal": {"tenant_id": "acme", "user_id": "bob"}, "workspaces": ["engineering"]}
   ]
 }
@@ -106,20 +107,22 @@ require authentication; request bodies reject unknown fields.
 | Method and path | Behavior |
 | --- | --- |
 | `POST /sessions` | `{"workspace_id":"engineering"}` → 201 session |
-| `GET /sessions` | Only the caller's currently accessible sessions |
+| `GET /sessions?after=&limit=` | `{"sessions":[…],"next":…}`: the caller's accessible sessions by ID; `limit` 1–200, default 50 |
+| `GET /workspaces/{workspace_id}/sessions?after=&limit=` | Every session in the workspace, any status; administrators only |
 | `GET /sessions/{id}` | Metadata without the internal runtime binding |
-| `PUT /sessions/{id}/members/{user_id}` | `{"role":"contributor"}` or `viewer`; owner only |
-| `DELETE /sessions/{id}/members/{user_id}` | Revoke member; owner only |
-| `POST /sessions/{id}/prompts` | `{"text":"Investigate this bug"}` → 202 admission receipt |
-| `POST /sessions/{id}/cancel` | Stop current run; owner only; queued inputs follow daemon semantics |
-| `DELETE /sessions/{id}` | Fence new gateway actions and stop runtime; owner only |
+| `PUT /sessions/{id}/members/{user_id}` | `{"role":"contributor"}` or `viewer`; owner or administrator |
+| `DELETE /sessions/{id}/members/{user_id}` | Revoke member; owner or administrator |
+| `PUT /sessions/{id}/owner` | `{"user_id":"bob"}`: transfer to an existing member; owner or administrator |
+| `POST /sessions/{id}/prompts` | `{"text":"Investigate this bug"}` → 202 admission receipt; optional `Idempotency-Key` header |
+| `POST /sessions/{id}/cancel` | Stop current run; owner or administrator; queued inputs follow daemon semantics |
+| `DELETE /sessions/{id}` | Fence new gateway actions and stop runtime, in any status; repeat to retry a failed shutdown; owner or administrator |
 | `GET /sessions/{id}/events` | SSE snapshot followed by runtime events; optional `Last-Event-ID` |
 
 Errors are `{"error": <message>, "code": <stable code>}`. Codes distinguish
-responses sharing a status: 409 is `conflict` or `not_ready`; 413
-`too_large`; 429 `limit_exceeded`; 503 `storage_unavailable` or
-`not_delivered` (certainly not applied, safe to retry); 502
-`runtime_unavailable` (outcome unknown, do not blindly retry).
+responses sharing a status: 409 is `conflict`, `not_ready` or
+`idempotency_unresolved`; 413 `too_large`; 429 `limit_exceeded`; 503
+`storage_unavailable` or `not_delivered` (certainly not applied, safe to retry);
+502 `runtime_unavailable` (outcome unknown, do not blindly retry).
 
 SSE provides streaming while writes use ordinary HTTP. Use streaming `fetch` for
 bearer headers; browser `EventSource` cannot set them. Cookie-based host auth
@@ -148,12 +151,26 @@ carries `{error, code}` and terminates the stream.
 Every session member, viewers included, receives every frame, including tool
 output. Restrict who joins a session if that is not acceptable.
 
+Prompts with an `Idempotency-Key` (1–256 bytes, scoped to author and session)
+are recorded before delivery. Retrying an admitted key returns the original
+receipt without resubmitting. A retry whose earlier attempt has an unknown
+outcome returns 409 `idempotency_unresolved`: reconcile history (prompts carry
+their `request_id`) before using a new key. A certain failure (`not_delivered`)
+frees the key.
+
 ## Collaboration and trust boundary
 
-A session starts with one immutable owner. They invite existing workspace members
-as contributors or viewers. Contributors submit prompts; viewers read/subscribe.
-Only the owner shares, revokes, cancels or closes. Every action also checks the
-host's current workspace policy.
+A session starts with one owner. They invite existing workspace members as
+contributors or viewers. Contributors submit prompts; viewers read/subscribe.
+Only the owner shares, transfers ownership, revokes, cancels or closes. Every
+action also checks the host's current workspace policy.
+
+Workspace administrators, those granted `GatewayAction::Administer` by the
+policy, may perform the owner's actions on any session of their workspace and
+list all its sessions, including `provisioning` and `failed` ones. They can
+recover a session whose owner left by transferring or closing it. Administration
+never grants reading, subscribing to or prompting a session the administrator is
+not a member of.
 
 The daemon adapter stores prompts as ordinary JSON user content with
 `request_id`, `author: {tenant_id, user_id}`, and `text`, so authors survive in
@@ -180,20 +197,23 @@ the agent.
 
 Implement `SessionStore` over your database, keying by tenant and session.
 Persist workspace, members, status, binding and revision. `replace` atomically
-compares revisions and rejects stale writes. `MemoryStore` loses metadata on exit;
-it is not durable SaaS storage. History remains the runtime's responsibility.
+compares revisions and rejects stale writes. Index membership and workspace so
+`list_member` and `list_workspace` read one page by session ID instead of the
+whole tenant. Store prompt keys with a unique constraint and expire settled keys
+on your retention schedule. `MemoryStore` loses metadata and keys on exit; it is
+not durable SaaS storage. History remains the runtime's responsibility.
 
 Creation records `provisioning` before contacting the runtime, then `ready` or
 `failed`. Failed binding persistence triggers an attempt to close the unbound
 runtime. Crashes or ambiguous transport outcomes require host reconciliation;
-the daemon session name carries the gateway ID. Close fences metadata first;
-failed runtime shutdown also needs reconciliation. Two independent stores are
-not treated as a single transaction.
+the daemon session name carries the gateway ID. Administrators find stuck
+sessions with `list_workspace` and close them. Close fences metadata first;
+closing again retries a failed runtime shutdown. Two independent stores are not
+treated as a single transaction.
 
 Mutations continue after HTTP disconnection while the Tokio runtime is alive.
 Admission receipts do not mean model completion. Timeouts/lost responses may
-hide successful admission. There are no automatic mutation retries or
-exactly-once guarantees; reconcile history before resubmitting. The daemon
+hide successful admission; idempotency keys make such retries safe. The daemon
 adapter reuses up to 4 idle command connections per workspace (discarded after
 30 seconds idle) and retries a command on a fresh connection only when a pooled
 one failed before delivery. Each subscription holds one connection, bounded by
@@ -201,7 +221,7 @@ one failed before delivery. Each subscription holds one connection, bounded by
 execution-adapter responsibilities.
 
 `Gateway::metrics()` returns process-local counters (sessions created/failed,
-prompts admitted/failed, runtime errors, active subscriptions, access
+prompts admitted/replayed/failed, runtime errors, active subscriptions, access
 rechecks, revoked streams) for the host's metrics exporter.
 
 The host supplies TLS, CORS/CSRF policy, rate/concurrency limits, retention and
@@ -213,17 +233,18 @@ bodies at 128 KiB, daemon frames and pre-response event backlogs at 8 MiB.
 ## Telemetry
 
 Opt in with a host-owned `TelemetryClient` through `with_telemetry`. Creation,
-sharing and prompt admission emit `agent feature outcome` with `gateway_session`,
-`gateway_share` and `gateway_prompt`, a random feature ID and `completed` outcome.
+sharing, ownership transfer and prompt admission emit `agent feature outcome`
+with `gateway_session`, `gateway_share`, `gateway_transfer` and `gateway_prompt`,
+a random feature ID and `completed` outcome. Idempotent replays emit nothing.
 No participant, tenant, session, content, path or credential enters these events.
 
 ## Verification and parity
 
 Run `make gateway-check`, `make check` and `make deny`. Focused tests cover access,
 roles, revocation, atomic metadata updates, attribution, HTTP impersonation,
-stream revocation and recheck cost, resume, telemetry privacy, and native
-daemon commands/handshake, connection reuse, dynamic routes and subscription
-limits.
+stream revocation and recheck cost, resume, idempotency, pagination,
+administration and close retry, telemetry privacy, and native daemon
+commands/handshake, connection reuse, dynamic routes and subscription limits.
 
 This opt-in surface leaves existing CLI, TUI, ACP and daemon schemas unchanged.
 Native identifiers such as `prime-agent.daemon` and command names are preserved.

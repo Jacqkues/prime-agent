@@ -9,8 +9,8 @@ use pa_gateway::{
 use pa_types::{
     daemon::{DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION},
     gateway::{
-        EventCursor, GatewayAction, Principal, RuntimeEvent, RuntimeEventKind, SubscribeFrom,
-        Workspace,
+        EventCursor, GatewayAction, Principal, PromptSubmission, RuntimeEvent, RuntimeEventKind,
+        SubscribeFrom, Workspace,
     },
     platform::transport::{bind_transport, AsyncWriteHalf},
 };
@@ -62,6 +62,13 @@ fn alice() -> Principal {
     Principal {
         tenant_id: "team".into(),
         user_id: "alice".into(),
+    }
+}
+
+fn text(text: &str) -> PromptSubmission {
+    PromptSubmission {
+        text: text.into(),
+        idempotency_key: None,
     }
 }
 
@@ -141,7 +148,7 @@ async fn native_daemon_commands_preserve_attribution_queueing_and_reuse_connecti
     );
     let session = gateway.create(alice(), "project".into()).await.unwrap();
     let receipt = gateway
-        .prompt(alice(), session.id.clone(), "hello".into())
+        .prompt(alice(), session.id.clone(), text("hello"))
         .await
         .unwrap();
     let mut stream = gateway
@@ -207,7 +214,7 @@ async fn a_closed_pooled_connection_is_replaced_without_losing_the_command() {
     let session = gateway.create(alice(), "project".into()).await.unwrap();
     assert_eq!(received.recv().await.unwrap().0, 0);
     gateway
-        .prompt(alice(), session.id, "after reconnect".into())
+        .prompt(alice(), session.id, text("after reconnect"))
         .await
         .unwrap();
     let (connection, command) = received.recv().await.unwrap();
@@ -288,7 +295,7 @@ async fn workspaces_can_be_registered_and_unregistered_while_running() {
     let session = gateway.create(alice(), "project".into()).await.unwrap();
     assert!(runtime.unregister(&workspace()));
     assert!(matches!(
-        gateway.prompt(alice(), session.id, "gone".into()).await,
+        gateway.prompt(alice(), session.id, text("gone")).await,
         Err(Error::Forbidden)
     ));
 }
@@ -314,8 +321,12 @@ async fn incompatible_handshake_never_receives_a_command() {
         gateway.create(alice(), "project".into()).await,
         Err(Error::NotDelivered(_))
     ));
+    let page = pa_types::gateway::PageRequest {
+        after: None,
+        limit: 10,
+    };
     assert_eq!(
-        gateway.list(&alice()).await.unwrap()[0].status,
+        gateway.list(&alice(), page).await.unwrap().sessions[0].status,
         pa_types::gateway::SessionStatus::Failed
     );
     server.await.unwrap();

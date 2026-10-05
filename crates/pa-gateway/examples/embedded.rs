@@ -35,6 +35,9 @@ struct User {
     token: String,
     principal: Principal,
     workspaces: Vec<String>,
+    /// Workspaces where this user may administer every session.
+    #[serde(default)]
+    administers: Vec<String>,
 }
 
 struct Identity(Vec<User>);
@@ -65,13 +68,21 @@ impl WorkspacePolicy for Identity {
         &self,
         principal: &Principal,
         workspace: &Workspace,
-        _action: GatewayAction,
+        action: GatewayAction,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         std::future::ready(
             if principal.tenant_id == workspace.tenant_id
                 && self.0.iter().any(|user| {
-                    user.principal == *principal
-                        && user.workspaces.contains(&workspace.workspace_id)
+                    let granted = match action {
+                        GatewayAction::Administer => &user.administers,
+                        GatewayAction::Create
+                        | GatewayAction::Read
+                        | GatewayAction::Prompt
+                        | GatewayAction::Share
+                        | GatewayAction::Cancel
+                        | GatewayAction::Close => &user.workspaces,
+                    };
+                    user.principal == *principal && granted.contains(&workspace.workspace_id)
                 })
             {
                 Ok(())

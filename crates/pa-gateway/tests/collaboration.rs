@@ -2,9 +2,18 @@ mod support;
 
 use futures::StreamExt;
 use pa_gateway::{Error, SessionStore};
-use pa_types::gateway::{AttributedPrompt, SessionRole, SessionStatus, SubscribeFrom};
+use pa_types::gateway::{
+    AttributedPrompt, PromptSubmission, SessionRole, SessionStatus, SubscribeFrom,
+};
 use serde_json::json;
-use support::{event, service, snapshot, user};
+use support::{event, page, service, snapshot, user};
+
+fn text(text: &str) -> PromptSubmission {
+    PromptSubmission {
+        text: text.into(),
+        idempotency_key: None,
+    }
+}
 
 #[tokio::test]
 async fn disconnect_during_admission_does_not_cancel_the_mutation() {
@@ -24,7 +33,7 @@ async fn disconnect_during_admission_does_not_cancel_the_mutation() {
     });
     let request = tokio::spawn(async move {
         gateway
-            .prompt(alice, session.id, "keep working".into())
+            .prompt(alice, session.id, text("keep working"))
             .await
     });
     ready.await.unwrap();
@@ -76,8 +85,8 @@ async fn collaborators_share_events_and_reconnect_without_stopping_work() {
     drop(first);
     drop(second);
     let (a, b) = tokio::join!(
-        gateway.prompt(alice, session.id.clone(), "a".into()),
-        gateway.prompt(bob.clone(), session.id.clone(), "b".into())
+        gateway.prompt(alice, session.id.clone(), text("a")),
+        gateway.prompt(bob.clone(), session.id.clone(), text("b"))
     );
     let expected = [
         AttributedPrompt {
@@ -120,7 +129,12 @@ async fn shared_sessions_check_tenant_membership_and_role_before_runtime_access(
         gateway.get(&user("other", "alice"), &session.id).await,
         Err(Error::NotFound)
     ));
-    assert!(gateway.list(&bob).await.unwrap().is_empty());
+    assert!(gateway
+        .list(&bob, page(50))
+        .await
+        .unwrap()
+        .sessions
+        .is_empty());
 
     let shared = gateway
         .set_member(
@@ -131,11 +145,14 @@ async fn shared_sessions_check_tenant_membership_and_role_before_runtime_access(
         )
         .await
         .unwrap();
-    assert_eq!(gateway.list(&bob).await.unwrap(), vec![shared.clone()]);
+    assert_eq!(
+        gateway.list(&bob, page(50)).await.unwrap().sessions,
+        vec![shared.clone()]
+    );
     assert_eq!(gateway.get(&bob, &session.id).await.unwrap(), shared);
     assert!(matches!(
         gateway
-            .prompt(bob.clone(), session.id.clone(), "work".into())
+            .prompt(bob.clone(), session.id.clone(), text("work"))
             .await,
         Err(Error::Forbidden)
     ));
@@ -171,7 +188,7 @@ async fn shared_sessions_check_tenant_membership_and_role_before_runtime_access(
         .await
         .unwrap();
     let receipt = gateway
-        .prompt(bob.clone(), session.id.clone(), "investigate".into())
+        .prompt(bob.clone(), session.id.clone(), text("investigate"))
         .await
         .unwrap();
     assert_eq!(
@@ -205,11 +222,16 @@ async fn workspace_revocation_and_session_close_fence_further_work() {
     policy.denied.write().await.insert("bob".into());
     assert!(matches!(
         gateway
-            .prompt(bob.clone(), session.id.clone(), "again".into())
+            .prompt(bob.clone(), session.id.clone(), text("again"))
             .await,
         Err(Error::Forbidden)
     ));
-    assert!(gateway.list(&bob).await.unwrap().is_empty());
+    assert!(gateway
+        .list(&bob, page(50))
+        .await
+        .unwrap()
+        .sessions
+        .is_empty());
     assert!(matches!(
         gateway
             .set_member(
@@ -230,7 +252,7 @@ async fn workspace_revocation_and_session_close_fence_further_work() {
         SessionStatus::Closed
     );
     assert!(matches!(
-        gateway.prompt(alice, session.id, "again".into()).await,
+        gateway.prompt(alice, session.id, text("again")).await,
         Err(Error::NotReady)
     ));
 }
@@ -338,12 +360,14 @@ async fn owner_cannot_be_removed_or_duplicated_and_inputs_are_bounded() {
     ));
     assert!(matches!(
         gateway
-            .prompt(alice.clone(), session.id.clone(), " ".into())
+            .prompt(alice.clone(), session.id.clone(), text(" "))
             .await,
         Err(Error::InvalidRequest)
     ));
     assert!(matches!(
-        gateway.prompt(alice, session.id, "x".repeat(65_537)).await,
+        gateway
+            .prompt(alice, session.id, text(&"x".repeat(65_537)))
+            .await,
         Err(Error::TooLarge)
     ));
     assert!(agent.prompts.lock().await.is_empty());
@@ -372,7 +396,7 @@ async fn adoption_events_do_not_contain_session_or_participant_content() {
         .await
         .unwrap();
     gateway
-        .prompt(alice, session.id, "secret prompt".into())
+        .prompt(alice, session.id, text("secret prompt"))
         .await
         .unwrap();
     client.shutdown().await.unwrap();

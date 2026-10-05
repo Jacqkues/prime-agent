@@ -10,8 +10,9 @@ use std::{
 use futures::StreamExt;
 use pa_telemetry::{AgentFeatureOutcome, TelemetryClient};
 use pa_types::gateway::{
-    AttributedPrompt, EventCursor, GatewayAction, GatewayMetrics, Principal, PromptReceipt,
-    RuntimeEvent, RuntimeEventKind, Session, SessionRole, SessionStatus, StoredSession,
+    AttributedPrompt, EventCursor, GatewayAction, GatewayMetrics, PageRequest, Principal,
+    PromptKey, PromptOutcome, PromptReceipt, PromptReservation, PromptSubmission, RuntimeEvent,
+    RuntimeEventKind, Session, SessionPage, SessionRole, SessionStatus, StoredSession,
     SubscribeFrom, Workspace,
 };
 use tokio::{sync::watch, time::Instant};
@@ -21,6 +22,7 @@ use crate::{Error, EventStream, Result, Runtime, SessionStore, WorkspacePolicy};
 /// Upper bound between access checks on an open subscription. Membership
 /// changes made through this process are applied before the next event.
 const ACCESS_RECHECK: Duration = Duration::from_secs(5);
+const PAGE_LIMIT: usize = 200;
 
 /// Shared-session service. Clone it to share the same host adapters.
 ///
@@ -43,6 +45,7 @@ struct Shared {
     sessions_created: AtomicU64,
     sessions_failed: AtomicU64,
     prompts_admitted: AtomicU64,
+    prompts_replayed: AtomicU64,
     prompts_failed: AtomicU64,
     runtime_errors: AtomicU64,
     active_subscriptions: AtomicU64,
@@ -57,6 +60,7 @@ impl Default for Shared {
             sessions_created: AtomicU64::default(),
             sessions_failed: AtomicU64::default(),
             prompts_admitted: AtomicU64::default(),
+            prompts_replayed: AtomicU64::default(),
             prompts_failed: AtomicU64::default(),
             runtime_errors: AtomicU64::default(),
             active_subscriptions: AtomicU64::default(),
@@ -116,6 +120,7 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
             sessions_created: load(&shared.sessions_created),
             sessions_failed: load(&shared.sessions_failed),
             prompts_admitted: load(&shared.prompts_admitted),
+            prompts_replayed: load(&shared.prompts_replayed),
             prompts_failed: load(&shared.prompts_failed),
             runtime_errors: load(&shared.runtime_errors),
             active_subscriptions: load(&shared.active_subscriptions),
@@ -128,15 +133,14 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
     ///
     /// # Errors
     /// Returns policy, persistence or runtime errors. A failed or interrupted
-    /// provision remains visible to its owner for host-side reconciliation.
+    /// provision remains visible to its owner and to workspace administrators
+    /// for reconciliation, and either can close it.
     #[tracing::instrument(skip_all)]
     pub async fn create(&self, principal: Principal, workspace_id: String) -> Result<Session> {
         let gateway = self.clone();
         complete(async move {
             validate_identity(&principal)?;
-            if workspace_id.is_empty() || workspace_id.len() > 256 {
-                return Err(Error::InvalidRequest);
-            }
+            validate_id(&workspace_id)?;
             let workspace = Workspace {
                 tenant_id: principal.tenant_id.clone(),
                 workspace_id,
@@ -167,7 +171,9 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
                     record.session.status = SessionStatus::Ready;
                     if let Err(error) = gateway.store.replace(record.clone(), 0).await {
                         // Keep the provisioning record, and retire the unbound resource.
-                        gateway.runtime.close(&record).await?;
+                        if let Err(close) = gateway.runtime.close(&record).await {
+                            tracing::warn!(error = %close, "unbound runtime needs reconciliation");
+                        }
                         gateway
                             .shared
                             .sessions_failed
@@ -207,39 +213,87 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
             .session)
     }
 
-    /// List only this principal's currently accessible sessions.
+    /// One page of this principal's currently accessible sessions. Workspace
+    /// policy is checked once per workspace on the page.
     ///
     /// # Errors
-    /// Returns identity, storage and policy-service failures.
+    /// Returns identity, page-size, storage and policy-service failures.
     #[tracing::instrument(skip_all)]
-    pub async fn list(&self, principal: &Principal) -> Result<Vec<Session>> {
+    pub async fn list(&self, principal: &Principal, page: PageRequest) -> Result<SessionPage> {
         validate_identity(principal)?;
-        let records = self.store.list(&principal.tenant_id).await?;
+        validate_page(&page)?;
+        let stored = self
+            .store
+            .list_member(&principal.tenant_id, &principal.user_id, &page)
+            .await?;
+        let mut readable = BTreeMap::new();
         let mut sessions = Vec::new();
-        for record in records {
-            if record.session.workspace.tenant_id != principal.tenant_id
-                || !record.session.members.contains_key(&principal.user_id)
+        for record in stored.records {
+            let session = record.session;
+            if session.workspace.tenant_id != principal.tenant_id
+                || !session.members.contains_key(&principal.user_id)
             {
                 continue;
             }
-            match self
-                .policy
-                .check(principal, &record.session.workspace, GatewayAction::Read)
-                .await
-            {
-                Ok(()) => sessions.push(record.session),
-                Err(Error::Forbidden | Error::NotFound) => {}
-                Err(error) => return Err(error),
+            let allowed = if let Some(allowed) = readable.get(&session.workspace) {
+                *allowed
+            } else {
+                let allowed = self
+                    .permits(principal, &session.workspace, GatewayAction::Read)
+                    .await?;
+                readable.insert(session.workspace.clone(), allowed);
+                allowed
+            };
+            if allowed {
+                sessions.push(session);
             }
         }
-        Ok(sessions)
+        Ok(SessionPage {
+            sessions,
+            next: stored.next,
+        })
+    }
+
+    /// One page of every session in a workspace, whatever its status or
+    /// membership, for workspace administrators reconciling stuck sessions.
+    ///
+    /// # Errors
+    /// Requires the policy's `Administer` grant for the workspace.
+    #[tracing::instrument(skip_all)]
+    pub async fn list_workspace(
+        &self,
+        principal: &Principal,
+        workspace_id: String,
+        page: PageRequest,
+    ) -> Result<SessionPage> {
+        validate_identity(principal)?;
+        validate_id(&workspace_id)?;
+        validate_page(&page)?;
+        let workspace = Workspace {
+            tenant_id: principal.tenant_id.clone(),
+            workspace_id,
+        };
+        self.policy
+            .check(principal, &workspace, GatewayAction::Administer)
+            .await?;
+        let stored = self.store.list_workspace(&workspace, &page).await?;
+        Ok(SessionPage {
+            sessions: stored
+                .records
+                .into_iter()
+                .map(|record| record.session)
+                .filter(|session| session.workspace == workspace)
+                .collect(),
+            next: stored.next,
+        })
     }
 
     /// Invite an existing workspace member or update their session role.
-    /// The original owner cannot be removed or demoted.
+    /// The owner cannot be removed or demoted here; see `transfer_ownership`.
     ///
     /// # Errors
-    /// Only an owner can share. Concurrent changes return `Error::Conflict`.
+    /// Only an owner or workspace administrator can share. Concurrent changes
+    /// return `Error::Conflict`.
     #[tracing::instrument(skip_all)]
     pub async fn set_member(
         &self,
@@ -275,11 +329,57 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         .await
     }
 
+    /// Make an existing member the owner; the previous owner becomes a
+    /// contributor. Lets a workspace administrator recover a session whose
+    /// owner left the workspace.
+    ///
+    /// # Errors
+    /// Only an owner or workspace administrator can transfer, and only to a
+    /// current member who can still read the workspace.
+    #[tracing::instrument(skip_all)]
+    pub async fn transfer_ownership(
+        &self,
+        principal: Principal,
+        id: String,
+        user_id: String,
+    ) -> Result<Session> {
+        let gateway = self.clone();
+        complete(async move {
+            let mut record = gateway
+                .authorize(&principal, &id, GatewayAction::Share)
+                .await?;
+            match record.session.members.get(&user_id) {
+                Some(SessionRole::Contributor | SessionRole::Viewer) => {}
+                Some(SessionRole::Owner) => return Err(Error::InvalidRequest),
+                None => return Err(Error::NotFound),
+            }
+            let member = Principal {
+                tenant_id: principal.tenant_id.clone(),
+                user_id: user_id.clone(),
+            };
+            gateway
+                .policy
+                .check(&member, &record.session.workspace, GatewayAction::Read)
+                .await?;
+            for role in record.session.members.values_mut() {
+                if *role == SessionRole::Owner {
+                    *role = SessionRole::Contributor;
+                }
+            }
+            record.session.members.insert(user_id, SessionRole::Owner);
+            let session = gateway.save(record).await?;
+            gateway.track("gateway_transfer");
+            Ok(session)
+        })
+        .await
+    }
+
     /// Revoke session access. Open subscriptions in this process stop before
     /// their next event; other gateway instances within `ACCESS_RECHECK`.
     ///
     /// # Errors
-    /// Only the owner may revoke a member, and the owner cannot be removed.
+    /// Only the owner or a workspace administrator may revoke a member, and
+    /// the owner cannot be removed.
     #[tracing::instrument(skip_all)]
     pub async fn remove_member(
         &self,
@@ -304,6 +404,10 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
     /// Admit a text prompt to the shared runtime queue. Attribution is derived
     /// from the principal; HTTP callers cannot supply another author.
     ///
+    /// With an idempotency key, retrying an admitted prompt returns its original
+    /// receipt without resubmitting. A retry whose earlier attempt has an
+    /// unknown outcome returns `Error::IdempotencyUnresolved`.
+    ///
     /// # Errors
     /// Read-only participants are denied. Text must contain 1–65536 UTF-8 bytes
     /// and not be only whitespace. Runtime errors may mean uncertain delivery.
@@ -312,20 +416,48 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         &self,
         principal: Principal,
         id: String,
-        text: String,
+        submission: PromptSubmission,
     ) -> Result<PromptReceipt> {
         let gateway = self.clone();
         complete(async move {
+            let PromptSubmission {
+                text,
+                idempotency_key,
+            } = submission;
             if text.trim().is_empty() {
                 return Err(Error::InvalidRequest);
             }
             if text.len() > 65_536 {
                 return Err(Error::TooLarge);
             }
+            if let Some(key) = &idempotency_key {
+                validate_id(key)?;
+            }
             let record = gateway
                 .authorize(&principal, &id, GatewayAction::Prompt)
                 .await?;
             let request_id = uuid::Uuid::new_v4().to_string();
+            let key = idempotency_key.map(|idempotency_key| PromptKey {
+                tenant_id: principal.tenant_id.clone(),
+                session_id: id,
+                user_id: principal.user_id.clone(),
+                idempotency_key,
+            });
+            if let Some(key) = &key {
+                match gateway.store.reserve_prompt(key, &request_id).await? {
+                    PromptReservation::Reserved => {}
+                    PromptReservation::Admitted { request_id } => {
+                        gateway
+                            .shared
+                            .prompts_replayed
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(PromptReceipt { request_id });
+                    }
+                    PromptReservation::Unresolved { .. } => {
+                        return Err(Error::IdempotencyUnresolved);
+                    }
+                }
+            }
             let admitted = gateway
                 .runtime
                 .prompt(
@@ -337,6 +469,18 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
                     },
                 )
                 .await;
+            let outcome = match &admitted {
+                Ok(()) => Some(PromptOutcome::Admitted),
+                Err(Error::NotDelivered(_)) => Some(PromptOutcome::NotDelivered),
+                // Unknown outcome: the key stays unresolved so no retry duplicates it.
+                Err(_) => None,
+            };
+            if let (Some(key), Some(outcome)) = (&key, outcome) {
+                if let Err(error) = gateway.store.settle_prompt(key, outcome).await {
+                    // An unsettled key only makes retries report an unknown outcome.
+                    tracing::warn!(%error, "prompt idempotency key left unresolved");
+                }
+            }
             if let Err(error) = gateway.shared.count(admitted) {
                 gateway
                     .shared
@@ -354,7 +498,8 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         .await
     }
 
-    /// Stop the current run. Only the owner can interrupt shared work.
+    /// Stop the current run. Only the owner or a workspace administrator can
+    /// interrupt shared work.
     ///
     /// # Errors
     /// Returns authorization or runtime failures.
@@ -370,11 +515,13 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         .await
     }
 
-    /// Fence new gateway actions and stop the runtime session. A runtime error
-    /// leaves the session closed to users; the host must reconcile shutdown.
+    /// Fence new gateway actions and stop the runtime session. Works in every
+    /// status: closing again retries a runtime shutdown that failed, and closing
+    /// a provisioning or failed session retires it.
     ///
     /// # Errors
-    /// Only the owner may close. Returns storage or runtime failures.
+    /// Only the owner or a workspace administrator may close. Returns storage or
+    /// runtime failures; a runtime failure leaves the session closed to users.
     #[tracing::instrument(skip_all)]
     pub async fn close(&self, principal: Principal, id: String) -> Result<()> {
         let gateway = self.clone();
@@ -382,8 +529,13 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
             let mut record = gateway
                 .authorize(&principal, &id, GatewayAction::Close)
                 .await?;
-            record.session.status = SessionStatus::Closed;
-            gateway.save(record.clone()).await?;
+            if record.session.status != SessionStatus::Closed {
+                record.session.status = SessionStatus::Closed;
+                gateway.save(record.clone()).await?;
+            }
+            if record.runtime_id.is_none() {
+                return Ok(());
+            }
             gateway.shared.count(gateway.runtime.close(&record).await)
         })
         .await
@@ -445,6 +597,20 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         Ok(record.session)
     }
 
+    /// Policy decision as a boolean; service failures still propagate.
+    async fn permits(
+        &self,
+        principal: &Principal,
+        workspace: &Workspace,
+        action: GatewayAction,
+    ) -> Result<bool> {
+        match self.policy.check(principal, workspace, action).await {
+            Ok(()) => Ok(true),
+            Err(Error::Forbidden | Error::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn authorize(
         &self,
         principal: &Principal,
@@ -456,26 +622,41 @@ impl<S: SessionStore, P: WorkspacePolicy, R: Runtime> Gateway<S, P, R> {
         if record.session.workspace.tenant_id != principal.tenant_id || record.session.id != id {
             return Err(Error::NotFound);
         }
-        let role = record
-            .session
-            .members
-            .get(&principal.user_id)
-            .ok_or(Error::NotFound)?;
-        let permitted = match action {
+        let role = record.session.members.get(&principal.user_id).copied();
+        let by_role = role.is_some_and(|role| match action {
             GatewayAction::Read => true,
             GatewayAction::Prompt => matches!(role, SessionRole::Owner | SessionRole::Contributor),
+            GatewayAction::Share | GatewayAction::Cancel | GatewayAction::Close => {
+                role == SessionRole::Owner
+            }
+            GatewayAction::Create | GatewayAction::Administer => false,
+        });
+        let administrable = matches!(
+            action,
+            GatewayAction::Share | GatewayAction::Cancel | GatewayAction::Close
+        );
+        let workspace = &record.session.workspace;
+        let permitted = (by_role && self.permits(principal, workspace, action).await?)
+            || (administrable
+                && self
+                    .permits(principal, workspace, GatewayAction::Administer)
+                    .await?);
+        if !permitted {
+            return Err(if role.is_some() {
+                Error::Forbidden
+            } else {
+                Error::NotFound
+            });
+        }
+        let needs_ready = match action {
+            GatewayAction::Read | GatewayAction::Close => false,
             GatewayAction::Create
+            | GatewayAction::Prompt
             | GatewayAction::Share
             | GatewayAction::Cancel
-            | GatewayAction::Close => *role == SessionRole::Owner,
+            | GatewayAction::Administer => true,
         };
-        if !permitted {
-            return Err(Error::Forbidden);
-        }
-        self.policy
-            .check(principal, &record.session.workspace, action)
-            .await?;
-        if action != GatewayAction::Read && record.session.status != SessionStatus::Ready {
+        if needs_ready && record.session.status != SessionStatus::Ready {
             return Err(Error::NotReady);
         }
         Ok(record)
@@ -590,6 +771,20 @@ fn validate_identity(principal: &Principal) -> Result<()> {
         .any(|id| id.is_empty() || id.len() > 256)
     {
         return Err(Error::Unauthenticated);
+    }
+    Ok(())
+}
+
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_page(page: &PageRequest) -> Result<()> {
+    if page.limit == 0 || page.limit > PAGE_LIMIT {
+        return Err(Error::InvalidRequest);
     }
     Ok(())
 }
