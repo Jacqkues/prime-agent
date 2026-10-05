@@ -36,6 +36,19 @@ either changes.
 
 ## Change hygiene
 
+### Gateway integration boundary
+
+`pa-gateway` is a reusable library for other applications. Authentication, durable
+metadata storage, workspace provisioning, credentials and quota policy belong to
+the embedding host through documented adapters. HTTP is optional. Do not require
+a particular identity provider, database or container platform. The native daemon
+adapter consumes `pa-types` over the existing wire protocol, without linking
+`pa-core` or `pa-daemon`. Shared gateway vocabulary lives in `pa-types::gateway`.
+Session membership is many-to-many; every operation checks tenant, workspace and
+session access. A session role must never grant access to another workspace.
+
+### General change hygiene
+
 - One logical change per PR: flag PRs that mix a feature with unrelated lint fixes or refactors, and fixes that do not ride with the change that introduced them.
 - If a change forces edits across many crate internals, the crate boundary is what needs fixing: flag that instead of the edits.
 - Risky raw APIs route through the in-house wrappers, not new raw call sites: process control (signals/process groups), file locking, permissions, and shell selection go through `pa-core`'s `platform` wall; durable renames go through `rename_onto`; TS-parity hashing (tool-call id normalization) uses `pa-ai`'s in-house `short_hash`; environment-variable resolution goes through its owning module (telemetry overrides in `pa-telemetry`, provider API keys in `pa-ai`), not duplicated ad-hoc parsing. Flag a raw call site that bypasses these walls.

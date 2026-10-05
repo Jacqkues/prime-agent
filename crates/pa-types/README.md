@@ -5,6 +5,11 @@ The single shared vocabulary crate. Nothing else is shared between crates.
 ## Scope
 Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/stream events, session JSONL entry schema, daemon wire protocol messages, worker frames.
 
+`gateway`: application principals, workspace identities, shared-session roles,
+metadata, runtime bindings, attributed prompts, admission receipts, prompt
+idempotency records, runtime event envelopes and cursors, pagination and
+gateway metrics. Gateway policy, persistence adapters and HTTP behavior belong to `pa-gateway`.
+
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:
 - `daemon::framing`: the private-frame codec of the worker socket (direct-attach clients speak it too).
 - `daemon::plane`: the session/control command-plane table (worker-side peer gating and client-side socket routing both read it).

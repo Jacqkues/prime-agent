@@ -100,7 +100,12 @@ class TheMappingTestCase(unittest.TestCase):
         rc, out, outputs = run_mapper(["crates/pa-telemetry/src/lib.rs"])
         self.assertEqual(rc, 0, out)
         self.assertEqual(outputs["crates"],
-                         "pa-cli,pa-core,pa-daemon,pa-telemetry,pa-tui")
+                         "pa-cli,pa-core,pa-daemon,pa-gateway,pa-telemetry,pa-tui")
+
+    def test_gateway_only_does_not_select_the_session_engine(self):
+        rc, out, outputs = run_mapper(["crates/pa-gateway/src/gateway.rs"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "pa-gateway")
 
     def test_an_unknown_crate_fails_safe(self):
         rc, out, outputs = run_mapper(["crates/pa-future/src/lib.rs"])
