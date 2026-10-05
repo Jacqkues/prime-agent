@@ -68,7 +68,7 @@ impl Default for Shared {
 
 impl Shared {
     fn count<T>(&self, result: Result<T>) -> Result<T> {
-        if matches!(result, Err(Error::Runtime(_))) {
+        if matches!(result, Err(Error::Runtime(_) | Error::NotDelivered(_))) {
             self.runtime_errors.fetch_add(1, Ordering::Relaxed);
         }
         result

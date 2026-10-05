@@ -22,6 +22,12 @@ struct WorkspaceConfiguration {
     workspace: Workspace,
     socket_path: std::path::PathBuf,
     create_config: serde_json::Value,
+    #[serde(default = "default_max_subscriptions")]
+    max_subscriptions: usize,
+}
+
+fn default_max_subscriptions() -> usize {
+    64
 }
 
 #[derive(Deserialize)]
@@ -94,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 DaemonEndpoint {
                     socket_path: config.socket_path,
                     create_config: config.create_config,
+                    max_subscriptions: config.max_subscriptions,
                 },
             )
         })

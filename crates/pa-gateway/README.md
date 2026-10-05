@@ -23,8 +23,9 @@ gateway access; they do not sandbox code executed by an agent.
   and `metrics()` counters.
 - `SessionStore`: host persistence with atomic revision checks.
 - `WorkspacePolicy`: current workspace authorization and admission checks.
-- `Runtime`: host execution boundary, with `DaemonRuntime` supplied.
-- `DaemonEndpoint`: trusted socket and create configuration per workspace.
+- `Runtime`: host execution boundary, with `DaemonRuntime` supplied (workspace
+  routes can be registered and unregistered while running).
+- `DaemonEndpoint`: trusted socket, create configuration and subscription limit per workspace.
 - `MemoryStore`: ephemeral reference adapter for local development and tests.
 - `EventStream`, `Error`, `Result`: streams and service outcomes.
 - Optional `http::{Authenticator, router}`: credential validation and Axum routes.
@@ -54,7 +55,8 @@ with your application's verified identity before deployment. Example host config
   "workspaces": [{
     "workspace": {"tenant_id": "acme", "workspace_id": "engineering"},
     "socket_path": "/absolute/isolated-runtime/daemon.sock",
-    "create_config": {"cwd": "/workspace"}
+    "create_config": {"cwd": "/workspace"},
+    "max_subscriptions": 64
   }],
   "users": [
     {"token": "replace-with-alice-secret", "principal": {"tenant_id": "acme", "user_id": "alice"}, "workspaces": ["engineering"]},
@@ -115,7 +117,8 @@ require authentication; request bodies reject unknown fields.
 
 Errors are `{"error": <message>, "code": <stable code>}`. Codes distinguish
 responses sharing a status: 409 is `conflict` or `not_ready`; 413
-`too_large`; 429 `limit_exceeded`; 503 `storage_unavailable`; 502
+`too_large`; 429 `limit_exceeded`; 503 `storage_unavailable` or
+`not_delivered` (certainly not applied, safe to retry); 502
 `runtime_unavailable` (outcome unknown, do not blindly retry).
 
 SSE provides streaming while writes use ordinary HTTP. Use streaming `fetch` for
@@ -190,8 +193,12 @@ not treated as a single transaction.
 Mutations continue after HTTP disconnection while the Tokio runtime is alive.
 Admission receipts do not mean model completion. Timeouts/lost responses may
 hide successful admission. There are no automatic mutation retries or
-exactly-once guarantees; reconcile history before resubmitting. Runtime recovery
-and queue durability are execution-adapter responsibilities.
+exactly-once guarantees; reconcile history before resubmitting. The daemon
+adapter reuses up to 4 idle command connections per workspace (discarded after
+30 seconds idle) and retries a command on a fresh connection only when a pooled
+one failed before delivery. Each subscription holds one connection, bounded by
+`max_subscriptions`. Runtime recovery and queue durability are
+execution-adapter responsibilities.
 
 `Gateway::metrics()` returns process-local counters (sessions created/failed,
 prompts admitted/failed, runtime errors, active subscriptions, access
@@ -214,8 +221,9 @@ No participant, tenant, session, content, path or credential enters these events
 
 Run `make gateway-check`, `make check` and `make deny`. Focused tests cover access,
 roles, revocation, atomic metadata updates, attribution, HTTP impersonation,
-stream revocation and recheck cost, resume, telemetry privacy and native
-daemon commands/handshake.
+stream revocation and recheck cost, resume, telemetry privacy, and native
+daemon commands/handshake, connection reuse, dynamic routes and subscription
+limits.
 
 This opt-in surface leaves existing CLI, TUI, ACP and daemon schemas unchanged.
 Native identifiers such as `prime-agent.daemon` and command names are preserved.
